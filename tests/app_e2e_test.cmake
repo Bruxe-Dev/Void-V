@@ -83,6 +83,20 @@ if(NOT after STREQUAL "corrupted")
     message(FATAL_ERROR "corrupted auth file was modified")
 endif()
 
+# Run 5b: Lockout / Account Recovery Mode when vault_auth.dat is deleted but vault_data.dat exists.
+# First attempt with wrong password (${PW}) is rejected because it cannot decrypt vault_data.dat;
+# second attempt with original password (${PW2}) succeeds, recovers data, saves secret 'date', and shows clean output.
+file(REMOVE "${WORK_DIR}/vault_auth.dat")
+run_app(run5b "${PW}\n${PW}\n${PW2}\n${PW2}\n1\n${PW2}\n8\nset\ndate\n23-10-2009\n3\n6\n" 0)
+expect_contains(run5b "ACCOUNT RECOVERY MODE")
+expect_contains(run5b "Password mismatch: That password cannot decrypt the existing vault_data.dat!")
+expect_contains(run5b "Account created.")
+expect_contains(run5b "date = 23-10-2009")
+string(FIND "${LAST_OUT}" "vv_internal_broker_key" leaked_internal)
+if(NOT leaked_internal EQUAL -1)
+    message(FATAL_ERROR "run5b: option 3 leaked raw VVKV1 internal broker key to stdout")
+endif()
+
 # Run 6: --broker IPC mode (SETUP, UNLOCK, SET_SECRET, ISSUE_TOKEN, VERIFY_TOKEN, DERIVE_APP_KEY, QUIT).
 file(REMOVE "${WORK_DIR}/vault_auth.dat" "${WORK_DIR}/vault_data.dat")
 string(HEX "${PW}" pw_hex)

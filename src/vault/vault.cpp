@@ -14,7 +14,9 @@ const char* vaultErrorMessage(VaultError error) {
     case VaultError::ForeignDataExists:
         return "existing data file cannot be decrypted with this password; refusing to overwrite it";
     case VaultError::WeakPassword:
-        return "password does not meet minimum length or complexity requirements";
+        return "password does not meet minimum length (12+ chars) or complexity requirements";
+    case VaultError::WrongCurrentPassword:
+        return "current password is incorrect (password was NOT changed)";
     }
     return "unknown error";
 }
@@ -70,6 +72,29 @@ void Vault::lock() {
     session_password.clear();
 }
 
+bool Vault::canDecryptExistingData(std::string_view candidate_password) {
+    if (!storage.exists()) {
+        return true;
+    }
+    std::string existing;
+    if (!storage.load(existing)) {
+        last_error = VaultError::StorageError;
+        return false;
+    }
+    if (existing.empty()) {
+        return true;
+    }
+    std::string probe;
+    const bool ok = encryption.decrypt(existing, candidate_password, probe);
+    if (!probe.empty()) {
+        sodium_memzero(probe.data(), probe.size());
+    }
+    if (!ok) {
+        last_error = VaultError::ForeignDataExists;
+    }
+    return ok;
+}
+
 bool Vault::saveData(std::string_view data) {
     if (!is_unlocked || session_password.empty()) {
         last_error = VaultError::Locked;
@@ -78,22 +103,8 @@ bool Vault::saveData(std::string_view data) {
 
     // Do not destroy existing data that this password cannot decrypt
     // (e.g. after an accidental re-initialization with a different password).
-    if (storage.exists()) {
-        std::string existing;
-        if (!storage.load(existing)) {
-            last_error = VaultError::StorageError;
-            return false;
-        }
-        std::string probe;
-        const bool readable = existing.empty() ||
-            encryption.decrypt(existing, session_password.view(), probe);
-        if (!probe.empty()) {
-            sodium_memzero(probe.data(), probe.size());
-        }
-        if (!readable) {
-            last_error = VaultError::ForeignDataExists;
-            return false;
-        }
+    if (!canDecryptExistingData(session_password.view())) {
+        return false;
     }
 
     std::string encrypted_data;
@@ -152,16 +163,16 @@ bool Vault::changePassword(std::string_view current_password, std::string_view n
         return false;
     }
 
-    if (!Authorizer::isPasswordAcceptable(new_password)) {
-        last_error = VaultError::WeakPassword;
-        return false;
-    }
-
     if (!session_password.constantTimeEquals(current_password)) {
         // Count the failed attempt in the authorizer and lock the vault.
         (void)authorizer.verifyPassword(current_password);
         lock();
-        last_error = VaultError::Locked;
+        last_error = VaultError::WrongCurrentPassword;
+        return false;
+    }
+
+    if (!Authorizer::isPasswordAcceptable(new_password)) {
+        last_error = VaultError::WeakPassword;
         return false;
     }
 

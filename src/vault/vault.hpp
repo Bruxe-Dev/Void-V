@@ -11,13 +11,14 @@
 
 enum class VaultError {
     None,
-    Locked,             // not authenticated / not unlocked
-    NoData,             // no data file yet
-    DecryptFailed,      // wrong password or corrupted / tampered data file
-    StorageError,       // file could not be read or written
+    Locked,               // not authenticated / not unlocked
+    NoData,               // no data file yet
+    DecryptFailed,        // wrong password or corrupted / tampered data file
+    StorageError,         // file could not be read or written
     EncryptFailed,
-    ForeignDataExists,  // existing data cannot be decrypted with this password; refusing to overwrite
-    WeakPassword        // new password fails length / entropy policy
+    ForeignDataExists,    // existing data cannot be decrypted with this password; refusing to overwrite
+    WeakPassword,         // new password fails length / entropy policy
+    WrongCurrentPassword  // current password verification failed during password rotation
 };
 
 const char* vaultErrorMessage(VaultError error);
@@ -40,6 +41,10 @@ public:
 
     bool saveData(std::string_view data);
     bool loadData(std::string& data);
+
+    // Checks whether `candidate_password` can decrypt the existing data file on disk
+    // (returns true if no data file exists yet or if decryption succeeds).
+    bool canDecryptExistingData(std::string_view candidate_password);
 
     // Atomically rotates the account password and re-encrypts any stored data
     // record under the new password. Requires the vault to be unlocked.

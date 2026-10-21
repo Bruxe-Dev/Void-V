@@ -2,8 +2,8 @@
 //
 // Passwords and confidential payloads are never accepted on the command line
 // and never pass through std::cin or std::string buffers. All input is read
-// byte-by-byte from the OS standard input handle directly into sodium_malloc
-// memory (SecureBuffer).
+// byte-by-byte from the OS console / standard input handle directly into
+// sodium_malloc memory (SecureBuffer).
 
 #include <iostream>
 #include <sstream>
@@ -26,6 +26,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <conio.h>
 #include <io.h>
 #else
 #include <termios.h>
@@ -90,6 +91,17 @@ namespace
         return true;
     }
 
+    bool isInteractiveConsole() noexcept
+    {
+#ifdef _WIN32
+        HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+        DWORD mode = 0;
+        return h != INVALID_HANDLE_VALUE && h != nullptr && GetConsoleMode(h, &mode) != 0;
+#else
+        return isatty(STDIN_FILENO) != 0;
+#endif
+    }
+
     // Reads a single byte from the OS standard input descriptor without
     // std::cin / stdio buffering, so secrets never linger in stream buffers.
     bool readRawByte(char &out_byte) noexcept
@@ -112,26 +124,19 @@ namespace
 #endif
     }
 
-    // RAII: disables console echo while alive (no-op if stdin is not a console).
+#ifndef _WIN32
+    // RAII: disables console echo while alive on POSIX terminals.
     class EchoGuard
     {
     public:
         EchoGuard()
         {
-#ifdef _WIN32
-            handle_ = GetStdHandle(STD_INPUT_HANDLE);
-            if (handle_ != INVALID_HANDLE_VALUE && GetConsoleMode(handle_, &mode_))
-            {
-                active_ = SetConsoleMode(handle_, mode_ & ~static_cast<DWORD>(ENABLE_ECHO_INPUT)) != 0;
-            }
-#else
             if (isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO, &old_) == 0)
             {
                 termios t = old_;
                 t.c_lflag &= ~static_cast<tcflag_t>(ECHO);
                 active_ = tcsetattr(STDIN_FILENO, TCSAFLUSH, &t) == 0;
             }
-#endif
         }
         ~EchoGuard()
         {
@@ -139,11 +144,7 @@ namespace
             {
                 return;
             }
-#ifdef _WIN32
-            SetConsoleMode(handle_, mode_);
-#else
             tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_);
-#endif
             std::cout << '\n';
         }
         EchoGuard(const EchoGuard &) = delete;
@@ -151,13 +152,9 @@ namespace
 
     private:
         bool active_ = false;
-#ifdef _WIN32
-        HANDLE handle_ = INVALID_HANDLE_VALUE;
-        DWORD mode_ = 0;
-#else
         termios old_{};
-#endif
     };
+#endif
 
     bool readSecureStreamLine(SecureBuffer &out)
     {
@@ -200,12 +197,67 @@ namespace
         return true;
     }
 
-    // Reads a password with echo disabled directly into sodium_malloc memory.
+    // Reads a password directly into sodium_malloc memory.
+    // On an interactive Windows console, uses _getch() with '*' visual feedback,
+    // clean Backspace erasure ("\b \b"), and extended-keycode filtering so
+    // arrow/function keys never insert garbage bytes into the password.
     bool readSecret(const char *prompt, SecureBuffer &out)
     {
         std::cout << prompt << std::flush;
+#ifdef _WIN32
+        if (isInteractiveConsole())
+        {
+            out.clear();
+            out.reserve(SecureBuffer::DEFAULT_CAPACITY);
+            while (true)
+            {
+                int ch = _getch();
+                if (ch == EOF || ch == 3) // EOF or Ctrl+C
+                {
+                    sodium_memzero(&ch, sizeof(ch));
+                    std::cout << '\n';
+                    out.clear();
+                    return false;
+                }
+                if (ch == '\r' || ch == '\n')
+                {
+                    sodium_memzero(&ch, sizeof(ch));
+                    std::cout << '\n';
+                    return true;
+                }
+                if (ch == 0 || ch == 0xE0)
+                {
+                    // Consume two-byte extended key (arrow keys, Delete, F-keys)
+                    (void)_getch();
+                    sodium_memzero(&ch, sizeof(ch));
+                    continue;
+                }
+                if (ch == '\b' || ch == 127)
+                {
+                    if (!out.empty())
+                    {
+                        out.pop_back();
+                        std::cout << "\b \b" << std::flush;
+                    }
+                    sodium_memzero(&ch, sizeof(ch));
+                    continue;
+                }
+                if (ch >= 0x20 && ch < 0x7F)
+                {
+                    const char c = static_cast<char>(ch);
+                    if (out.push_back(c))
+                    {
+                        std::cout << '*' << std::flush;
+                    }
+                }
+                sodium_memzero(&ch, sizeof(ch));
+            }
+        }
+        return readSecureStreamLine(out);
+#else
         EchoGuard guard;
         return readSecureStreamLine(out);
+#endif
     }
 
     // Reads a single line (echo enabled) directly into sodium_malloc memory.
@@ -226,6 +278,11 @@ namespace
         return true;
     }
 
+    bool isKvContainer(std::string_view raw) noexcept
+    {
+        return raw.size() >= 5 && raw.compare(0, 5, "VVKV1") == 0;
+    }
+
     void printHelp()
     {
         std::cout << "Void Vault v1.0.0 — Authenticated Encrypted Local Vault & Capability Broker\n"
@@ -236,11 +293,48 @@ namespace
                      "  (default: current directory). Passwords are only read interactively or via --broker IPC.\n";
     }
 
-    int firstTimeSetup(Authorizer &authorizer)
+    void printMenu(bool unlocked)
     {
-        std::cout << "No account found. First-time setup.\n"
-                  << "Choose a password of at least " << Authorizer::MIN_PASSWORD_LENGTH
-                  << " characters.\n";
+        if (isInteractiveConsole())
+        {
+            std::cout << "\n============================================================\n"
+                      << "  VOID VAULT STATUS : [" << (unlocked ? "UNLOCKED" : "LOCKED") << "]\n"
+                      << "============================================================\n"
+                      << "  [1] Unlock Vault              [6] Quit (Lock & Exit)\n"
+                      << "  [2] Save Quick Text Note      [7] Change Master Password\n"
+                      << "  [3] View All Stored Data      [8] Manage Named Secrets (Key-Value)\n"
+                      << "  [4] Lock Vault                [9] Generate App Auth Token\n"
+                      << "  [5] Check Vault Status\n"
+                      << "------------------------------------------------------------\n";
+        }
+        else
+        {
+            std::cout << "\n[" << (unlocked ? "UNLOCKED" : "LOCKED") << "] "
+                      << "1) unlock  2) save text  3) show data  4) lock  5) status  6) quit  "
+                      << "7) change password  8) secrets  9) app token\n";
+        }
+    }
+
+    int firstTimeSetup(Authorizer &authorizer, Storage &storage, Vault &vault)
+    {
+        const bool recovering_existing_data = storage.exists();
+        if (recovering_existing_data)
+        {
+            std::cout << "\n============================================================\n"
+                      << "  ACCOUNT RECOVERY MODE (Existing vault_data.dat found!)\n"
+                      << "============================================================\n"
+                      << "An encrypted vault_data.dat file already exists in this folder,\n"
+                      << "but vault_auth.dat is missing.\n"
+                      << "To recover your existing secrets, enter the ORIGINAL master\n"
+                      << "password that was used to encrypt vault_data.dat.\n\n";
+        }
+        else
+        {
+            std::cout << "No account found. First-time setup.\n"
+                      << "Choose a password of at least " << Authorizer::MIN_PASSWORD_LENGTH
+                      << " characters.\n";
+        }
+
         for (int tries = 0; tries < 3; ++tries)
         {
             SecureBuffer first, second;
@@ -251,7 +345,8 @@ namespace
             }
             if (first.view().size() < Authorizer::MIN_PASSWORD_LENGTH)
             {
-                std::cout << "Password too short.\n";
+                std::cout << "Password too short (minimum " << Authorizer::MIN_PASSWORD_LENGTH
+                          << " characters required).\n";
                 continue;
             }
             if (!Authorizer::isPasswordAcceptable(first.view()))
@@ -261,7 +356,14 @@ namespace
             }
             if (!first.constantTimeEquals(second))
             {
-                std::cout << "Passwords do not match.\n";
+                std::cout << "Passwords do not match. Please try again.\n";
+                continue;
+            }
+            if (recovering_existing_data && !vault.canDecryptExistingData(first.view()))
+            {
+                std::cout << "\n[!] Password mismatch: That password cannot decrypt the existing vault_data.dat!\n"
+                          << "    Please enter the exact password that was active when your data was saved.\n"
+                          << "    (If you want to start a brand-new empty vault instead, delete or move vault_data.dat).\n\n";
                 continue;
             }
             if (!authorizer.setPassword(first.view()))
@@ -270,6 +372,10 @@ namespace
                 return 1;
             }
             std::cout << "Account created.\n";
+            if (recovering_existing_data)
+            {
+                std::cout << "Existing encrypted vault data verified and linked to your recovered account.\n";
+            }
             return 0;
         }
         std::cout << "Too many invalid setup attempts.\n";
@@ -306,7 +412,9 @@ namespace
                 std::string pw_hex;
                 in >> pw_hex;
                 SecureBuffer pw;
-                if (decodeHexToSecureBuffer(pw_hex, pw) && authorizer.setPassword(pw.view()))
+                if (decodeHexToSecureBuffer(pw_hex, pw) &&
+                    vault.canDecryptExistingData(pw.view()) &&
+                    authorizer.setPassword(pw.view()))
                 {
                     std::cout << "OK initialized\n" << std::flush;
                 }
@@ -596,7 +704,7 @@ int main(int argc, char **argv)
 
     if (!authorizer.isInitialized())
     {
-        const int rc = firstTimeSetup(authorizer);
+        const int rc = firstTimeSetup(authorizer, storage, vault);
         if (rc != 0)
         {
             return rc;
@@ -609,23 +717,22 @@ int main(int argc, char **argv)
         {
             std::cerr << "Account is locked after " << Authorizer::MAX_FAILED_ATTEMPTS
                       << " failed attempts (persists across restarts).\n"
-                         "Recovery is manual; see README (Lockout recovery).\n";
+                         "Recovery: Delete vault_auth.dat, launch void_vault.exe again, and enter\n"
+                         "your ORIGINAL master password to recover your encrypted vault_data.dat.\n";
             vault.lock();
             return 4;
         }
 
-        std::cout << "\n[" << (vault.isUnlocked() ? "UNLOCKED" : "LOCKED") << "] "
-                  << "1) unlock  2) save text  3) show data  4) lock  5) status  6) quit  "
-                  << "7) change password  8) secrets  9) app token\n";
+        printMenu(vault.isUnlocked());
         std::string choice;
-        if (!readLine("> ", choice))
+        if (!readLine("Select option (1-9): > ", choice))
         {
             std::cout << "\nInput closed. Locking and exiting.\n";
             vault.lock();
             return 0;
         }
 
-        if (choice == "1")
+        if (choice == "1" || choice == "unlock")
         {
             SecureBuffer password;
             if (!readSecret("Password: ", password))
@@ -642,7 +749,7 @@ int main(int argc, char **argv)
                           << (Authorizer::MAX_FAILED_ATTEMPTS - authorizer.failedAttempts()) << '\n';
             }
         }
-        else if (choice == "2")
+        else if (choice == "2" || choice == "save")
         {
             if (!vault.isUnlocked())
             {
@@ -654,7 +761,15 @@ int main(int argc, char **argv)
             {
                 continue;
             }
-            if (vault.saveData(text.view()))
+            // If the vault already contains a VVKV1 key-value store, preserve all
+            // existing named secrets by storing this note under the "default" key.
+            std::string existing_raw;
+            const bool has_kv = storage.exists() && vault.loadData(existing_raw) && isKvContainer(existing_raw);
+            wipe(existing_raw);
+
+            const bool saved = has_kv ? broker.setSecret("default", text.view())
+                                      : vault.saveData(text.view());
+            if (saved)
             {
                 std::cout << "Saved (encrypted).\n";
             }
@@ -663,25 +778,55 @@ int main(int argc, char **argv)
                 std::cout << "Save failed: " << vaultErrorMessage(vault.lastError()) << '\n';
             }
         }
-        else if (choice == "3")
+        else if (choice == "3" || choice == "show")
         {
             std::string text;
-            if (vault.loadData(text))
+            if (!vault.loadData(text))
             {
-                std::cout << "Stored data: " << text << '\n';
+                std::cout << "Load failed: " << vaultErrorMessage(vault.lastError()) << '\n';
+                continue;
+            }
+            if (isKvContainer(text))
+            {
+                wipe(text);
+                std::vector<std::string> keys;
+                if (broker.listKeys(keys))
+                {
+                    if (keys.empty())
+                    {
+                        std::cout << "Stored data: (vault key-value container is currently empty)\n";
+                    }
+                    else
+                    {
+                        std::cout << "--- Stored Vault Secrets (" << keys.size() << ") ---\n";
+                        for (const auto &k : keys)
+                        {
+                            std::string val;
+                            if (broker.getSecret(k, val))
+                            {
+                                std::cout << "  " << k << " = " << val << '\n';
+                                wipe(val);
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    std::cout << "Load failed: could not parse key-value store.\n";
+                }
             }
             else
             {
-                std::cout << "Load failed: " << vaultErrorMessage(vault.lastError()) << '\n';
+                std::cout << "Stored data: " << text << '\n';
+                wipe(text);
             }
-            wipe(text);
         }
-        else if (choice == "4")
+        else if (choice == "4" || choice == "lock")
         {
             vault.lock();
             std::cout << "Vault locked.\n";
         }
-        else if (choice == "5")
+        else if (choice == "5" || choice == "status")
         {
             std::cout << "Unlocked: " << (vault.isUnlocked() ? "yes" : "no")
                       << " | failed attempts: " << authorizer.failedAttempts() << '/'
@@ -703,14 +848,14 @@ int main(int argc, char **argv)
             }
             SecureBuffer current_pw, new_pw, confirm_pw;
             if (!readSecret("Current password: ", current_pw) ||
-                !readSecret("New password: ", new_pw) ||
+                !readSecret("New password (min 12 chars): ", new_pw) ||
                 !readSecret("Confirm new password: ", confirm_pw))
             {
                 continue;
             }
             if (!new_pw.constantTimeEquals(confirm_pw))
             {
-                std::cout << "Passwords do not match.\n";
+                std::cout << "Password change aborted: New passwords do not match (your password was NOT changed).\n";
                 continue;
             }
             if (vault.changePassword(current_pw.view(), new_pw.view()))
@@ -720,25 +865,40 @@ int main(int argc, char **argv)
             else
             {
                 std::cout << "Password change failed: " << vaultErrorMessage(vault.lastError()) << '\n';
+                if (vault.lastError() == VaultError::WrongCurrentPassword)
+                {
+                    std::cout << "Vault has been locked for security. Remaining attempts before lockout: "
+                              << (Authorizer::MAX_FAILED_ATTEMPTS - authorizer.failedAttempts()) << '\n';
+                }
             }
         }
-        else if (choice == "8")
+        else if (choice == "8" || choice == "secrets")
         {
             if (!vault.isUnlocked())
             {
                 std::cout << "Rejected: " << vaultErrorMessage(VaultError::Locked) << '\n';
                 continue;
             }
+            if (isInteractiveConsole())
+            {
+                std::cout << "\n--- Named Secrets Manager ---\n"
+                          << "  [1 or set]  Save or update a secret (Key -> Value)\n"
+                          << "  [2 or get]  View a specific secret by Key\n"
+                          << "  [3 or list] List all stored secret Keys\n"
+                          << "  [4 or del]  Delete a secret by Key\n"
+                          << "  [5 or back] Return to main menu\n";
+            }
             std::string action;
-            if (!readLine("Secrets [set/get/del/list]: ", action))
+            if (!readLine("Secrets [1=set / 2=get / 3=list / 4=del / 5=back]: ", action))
             {
                 continue;
             }
-            if (action == "set")
+            if (action == "1" || action == "set")
             {
                 std::string key;
                 SecureBuffer val;
-                if (!readLine("Key name: ", key) || !readSensitiveLine("Secret value: ", val))
+                if (!readLine("Key name (no spaces, e.g. date or trader.api_key): ", key) ||
+                    !readSensitiveLine("Secret value: ", val))
                 {
                     continue;
                 }
@@ -748,10 +908,10 @@ int main(int argc, char **argv)
                 }
                 else
                 {
-                    std::cout << "Failed to save secret.\n";
+                    std::cout << "Failed to save secret (key name must not contain spaces or start with '__vv_').\n";
                 }
             }
-            else if (action == "get")
+            else if (action == "2" || action == "get")
             {
                 std::string key, val;
                 if (!readLine("Key name: ", key))
@@ -765,38 +925,53 @@ int main(int argc, char **argv)
                 }
                 else
                 {
-                    std::cout << "Secret not found.\n";
+                    std::cout << "Secret '" << key << "' not found.\n";
                 }
             }
-            else if (action == "del")
+            else if (action == "3" || action == "list")
+            {
+                std::vector<std::string> keys;
+                if (broker.listKeys(keys))
+                {
+                    if (keys.empty())
+                    {
+                        std::cout << "No secrets stored yet.\n";
+                    }
+                    else
+                    {
+                        std::cout << "Stored Keys (" << keys.size() << "):\n";
+                        for (const auto &k : keys)
+                        {
+                            std::cout << "  - " << k << '\n';
+                        }
+                    }
+                }
+            }
+            else if (action == "4" || action == "del")
             {
                 std::string key;
-                if (!readLine("Key name: ", key))
+                if (!readLine("Key name to delete: ", key))
                 {
                     continue;
                 }
                 std::cout << (broker.deleteSecret(key) ? "Secret deleted.\n" : "Secret not found.\n");
             }
-            else if (action == "list")
-            {
-                std::vector<std::string> keys;
-                if (broker.listKeys(keys))
-                {
-                    std::cout << "Keys (" << keys.size() << "):";
-                    for (const auto &k : keys)
-                    {
-                        std::cout << ' ' << k;
-                    }
-                    std::cout << '\n';
-                }
-            }
         }
-        else if (choice == "9")
+        else if (choice == "9" || choice == "token")
         {
             if (!vault.isUnlocked())
             {
                 std::cout << "Rejected: " << vaultErrorMessage(VaultError::Locked) << '\n';
                 continue;
+            }
+            if (isInteractiveConsole())
+            {
+                std::cout << "\n--- Generate 'Sign in with Void Vault' App Token ---\n"
+                          << "  Scope examples:\n"
+                          << "    *               (full access to all secrets)\n"
+                          << "    read:*          (read-only access to all secrets)\n"
+                          << "    read:trader.*   (read-only access to keys starting with 'trader.')\n"
+                          << "    key:date        (read/write access only to key 'date')\n";
             }
             std::string app_id, scope;
             if (!readLine("Application ID (e.g. void-trader): ", app_id) ||
@@ -811,7 +986,7 @@ int main(int argc, char **argv)
             }
             else
             {
-                std::cout << "Failed to issue token (check app_id / scope format).\n";
+                std::cout << "Failed to issue token (app_id and scope must not contain spaces).\n";
             }
         }
         else if (!choice.empty())
