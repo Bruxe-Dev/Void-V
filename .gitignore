@@ -1,0 +1,27 @@
+# Build and release directories
+build/
+build-*/
+biuld/
+cmake-build-*/
+out/
+dist/
+
+# Runtime vault files, test data, and locks
+*.dat
+*.dat.tmp
+*.lock
+
+# Local binaries, archives, and scratch files
+*.exe
+*.tar.gz
+*.zip
+compiler_test.*
+CMakeUserPresets.json
+
+# IDE / OS files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db

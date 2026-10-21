@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  package-windows:
+    name: Package Windows x64 Standalone
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-libsodium
+
+      - name: Build, Test, and Package
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DVOID_VAULT_STATIC_RUNTIME=ON
+          cmake --build build -j 4
+          ctest --test-dir build --output-on-failure
+          mkdir -p "dist/void-vault-${GITHUB_REF_NAME}-windows-x64/include"
+          mkdir -p "dist/void-vault-${GITHUB_REF_NAME}-windows-x64/sdk/python"
+          cp build/void_vault.exe "dist/void-vault-${GITHUB_REF_NAME}-windows-x64/"
+          strip --strip-all "dist/void-vault-${GITHUB_REF_NAME}-windows-x64/void_vault.exe"
+          cp README.md DEVELOPER_GUIDE.md SECURITY.md LICENSE "dist/void-vault-${GITHUB_REF_NAME}-windows-x64/"
+          cp include/void_vault_c.h "dist/void-vault-${GITHUB_REF_NAME}-windows-x64/include/"
+          cp sdk/python/void_vault.py "dist/void-vault-${GITHUB_REF_NAME}-windows-x64/sdk/python/"
+
+      - name: Create ZIP & Checksum (PowerShell)
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $zip = "dist/void-vault-$tag-windows-x64.zip"
+          Compress-Archive -Path "dist/void-vault-$tag-windows-x64/*" -DestinationPath $zip -Force
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          "$hash  void-vault-$tag-windows-x64.zip" | Out-File -FilePath "dist/SHA256SUMS-windows-x64.txt" -Encoding ascii
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS-windows-x64.txt
+
+  package-linux:
+    name: Package Linux x64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config libsodium-dev
+
+      - name: Build, Test, and Package
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j 4
+          ctest --test-dir build --output-on-failure
+          STAGE="dist/void-vault-${TAG}-linux-x64"
+          mkdir -p "${STAGE}/include" "${STAGE}/sdk/python"
+          cp build/void_vault "${STAGE}/"
+          strip --strip-all "${STAGE}/void_vault"
+          cp README.md DEVELOPER_GUIDE.md SECURITY.md LICENSE "${STAGE}/"
+          cp include/void_vault_c.h "${STAGE}/include/"
+          cp sdk/python/void_vault.py "${STAGE}/sdk/python/"
+          tar -C dist -czf "dist/void-vault-${TAG}-linux-x64.tar.gz" "void-vault-${TAG}-linux-x64"
+          (cd dist && sha256sum "void-vault-${TAG}-linux-x64.tar.gz" > SHA256SUMS-linux-x64.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS-linux-x64.txt
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [ package-windows, package-linux ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Merge SHA256SUMS
+        run: |
+          cat artifacts/*/SHA256SUMS-*.txt > artifacts/SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/windows-x64/*.zip
+            artifacts/linux-x64/*.tar.gz
+            artifacts/SHA256SUMS.txt
