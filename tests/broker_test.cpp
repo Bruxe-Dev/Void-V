@@ -119,16 +119,23 @@ int main()
                   key_med_1 != key_trader_1,
               "Different app_id derives completely isolated subkey");
 
-        // --- 4. Token revocation ---
-        check(broker.revokeAllTokens(), "revokeAllTokens rotates internal broker key");
+        // --- 4. Per-App & Global Token Revocation ---
+        check(broker.revokeAppTokens("void-trader"), "revokeAppTokens(void-trader) succeeds");
         check(!broker.verifyToken(trader_read_token, "void-trader", claims, 1100),
-              "Previously issued token is immediately invalidated after revokeAllTokens");
+              "void-trader token is immediately invalidated after revokeAppTokens(void-trader)");
+        check(broker.verifyToken(med_token, "medical-app", claims, 1100),
+              "medical-app token remains valid when only void-trader is revoked");
+
+        check(broker.revokeAllTokens(), "revokeAllTokens rotates internal broker key");
+        check(!broker.verifyToken(med_token, "medical-app", claims, 1100),
+              "All remaining tokens invalidated after revokeAllTokens");
     }
 
-    // --- 5. Universal C ABI (void_vault_c.h) test ---
+    // --- 5. Universal C ABI v2 (void_vault_c.h) test ---
     {
         const std::string c_auth = dir.file("c_abi_auth.dat");
         const std::string c_data = dir.file("c_abi_data.dat");
+        const std::string c_audit = c_data + ".audit.log";
         VoidVaultHandle *h = vv_open(c_auth.c_str(), c_data.c_str());
         check(h != nullptr, "vv_open creates handle");
         check(vv_is_initialized(h) == 0, "vv_is_initialized returns 0 initially");
@@ -151,8 +158,25 @@ int main()
                   std::strlen(app_key_hex) == 64,
               "vv_derive_app_key derives 64-hex-char subkey via C ABI");
 
+        check(vv_revoke_app_tokens(h, "c-client") == 1, "vv_revoke_app_tokens succeeds via C ABI");
+        check(vv_verify_token(h, token_buf, "c-client") == 0, "Revoked app token rejected via C ABI");
+
+        char rec_key_buf[64]{};
+        check(vv_generate_recovery_key(h, rec_key_buf, sizeof(rec_key_buf)) == 1 &&
+                  std::strncmp(rec_key_buf, "VVREC-", 6) == 0,
+              "vv_generate_recovery_key generates VVREC- key via C ABI");
+
         vv_lock(h);
         check(vv_is_unlocked(h) == 0, "vv_lock locks vault");
+        check(vv_recover_with_emergency_key(h, rec_key_buf, "NewCAbiMasterPass99!") == 1 &&
+                  vv_is_unlocked(h) == 1,
+              "vv_recover_with_emergency_key recovers and unlocks vault via C ABI");
+
+        std::size_t audit_count = 0;
+        std::size_t failed_line = 0;
+        check(vv_verify_audit_log(c_audit.c_str(), &audit_count, &failed_line) == 1 && audit_count >= 5,
+              "vv_verify_audit_log verifies BLAKE2b hash chain via C ABI");
+
         vv_close(h);
     }
 

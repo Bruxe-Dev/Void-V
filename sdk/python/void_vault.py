@@ -129,10 +129,10 @@ class VoidVaultNativeClient:
         self._dll_path = str(Path(dll_path).resolve())
         self._data_dir = Path(data_dir).resolve()
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        self._kdf_map = {"interactive": 0, "moderate": 1, "sensitive": 2}
-        if kdf_profile not in self._kdf_map:
-            raise VoidVaultError(f"Invalid kdf_profile: {kdf_profile}")
-        self._kdf = self._kdf_map[kdf_profile]
+        self._auth_path = str(self._data_dir / "vault_auth.dat")
+        self._data_path = str(self._data_dir / "vault_data.dat")
+        self._audit_path = str(self._data_dir / "vault_audit.log")
+        self._kdf = kdf_profile
         self._idle_timeout = idle_timeout_seconds
         self._lib = ctypes.CDLL(self._dll_path)
         self._bind_signatures()
@@ -140,8 +140,8 @@ class VoidVaultNativeClient:
 
     def _bind_signatures(self) -> None:
         L = self._lib
-        L.vv_open.argtypes = [ctypes.c_char_p, ctypes.c_int]
-        L.vv_open.restype = ctypes.c_void_p
+        L.vv_open_with_audit.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
+        L.vv_open_with_audit.restype = ctypes.c_void_p
 
         L.vv_close.argtypes = [ctypes.c_void_p]
         L.vv_close.restype = None
@@ -149,8 +149,8 @@ class VoidVaultNativeClient:
         L.vv_is_initialized.argtypes = [ctypes.c_void_p]
         L.vv_is_initialized.restype = ctypes.c_int
 
-        L.vv_is_locked_out.argtypes = [ctypes.c_void_p]
-        L.vv_is_locked_out.restype = ctypes.c_int
+        L.vv_is_unlocked.argtypes = [ctypes.c_void_p]
+        L.vv_is_unlocked.restype = ctypes.c_int
 
         L.vv_setup_password.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
         L.vv_setup_password.restype = ctypes.c_int
@@ -164,18 +164,31 @@ class VoidVaultNativeClient:
         L.vv_set_secret.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
         L.vv_set_secret.restype = ctypes.c_int
 
-        L.vv_get_secret.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
+        L.vv_get_secret.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_size_t,
+        ]
         L.vv_get_secret.restype = ctypes.c_int
 
         L.vv_delete_secret.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
         L.vv_delete_secret.restype = ctypes.c_int
+
+        L.vv_list_keys.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_size_t,
+        ]
+        L.vv_list_keys.restype = ctypes.c_int
 
         L.vv_issue_token.argtypes = [
             ctypes.c_void_p,
             ctypes.c_char_p,
             ctypes.c_char_p,
             ctypes.c_uint64,
-            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_char_p,
+            ctypes.c_size_t,
         ]
         L.vv_issue_token.restype = ctypes.c_int
 
@@ -183,35 +196,35 @@ class VoidVaultNativeClient:
             ctypes.c_void_p,
             ctypes.c_char_p,
             ctypes.c_char_p,
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(ctypes.c_uint64),
         ]
         L.vv_verify_token.restype = ctypes.c_int
 
-        L.vv_token_get_secret.argtypes = [
+        L.vv_get_secret_with_token.argtypes = [
             ctypes.c_void_p,
             ctypes.c_char_p,
             ctypes.c_char_p,
             ctypes.c_char_p,
-            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_char_p,
+            ctypes.c_size_t,
         ]
-        L.vv_token_get_secret.restype = ctypes.c_int
+        L.vv_get_secret_with_token.restype = ctypes.c_int
 
-        L.vv_token_set_secret.argtypes = [
+        L.vv_set_secret_with_token.argtypes = [
             ctypes.c_void_p,
             ctypes.c_char_p,
             ctypes.c_char_p,
             ctypes.c_char_p,
             ctypes.c_char_p,
         ]
-        L.vv_token_set_secret.restype = ctypes.c_int
+        L.vv_set_secret_with_token.restype = ctypes.c_int
 
         L.vv_derive_app_key.argtypes = [
             ctypes.c_void_p,
             ctypes.c_char_p,
             ctypes.c_char_p,
             ctypes.c_uint64,
-            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_char_p,
+            ctypes.c_size_t,
         ]
         L.vv_derive_app_key.restype = ctypes.c_int
 
@@ -221,7 +234,11 @@ class VoidVaultNativeClient:
         L.vv_revoke_app_tokens.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
         L.vv_revoke_app_tokens.restype = ctypes.c_int
 
-        L.vv_generate_recovery_key.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+        L.vv_generate_recovery_key.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_size_t,
+        ]
         L.vv_generate_recovery_key.restype = ctypes.c_int
 
         L.vv_recover_with_emergency_key.argtypes = [
@@ -231,26 +248,12 @@ class VoidVaultNativeClient:
         ]
         L.vv_recover_with_emergency_key.restype = ctypes.c_int
 
-        L.vv_verify_audit_log.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t)]
+        L.vv_verify_audit_log.argtypes = [
+            ctypes.c_char_p,
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
         L.vv_verify_audit_log.restype = ctypes.c_int
-
-        L.vv_set_idle_timeout.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
-        L.vv_set_idle_timeout.restype = None
-
-        L.vv_check_idle_timeout.argtypes = [ctypes.c_void_p]
-        L.vv_check_idle_timeout.restype = ctypes.c_int
-
-        L.vv_string_free.argtypes = [ctypes.c_void_p]
-        L.vv_string_free.restype = None
-
-    def _consume_c_str(self, ptr: ctypes.c_void_p) -> str:
-        if not ptr.value:
-            return ""
-        try:
-            raw = ctypes.cast(ptr, ctypes.c_char_p).value
-            return raw.decode("utf-8") if raw is not None else ""
-        finally:
-            self._lib.vv_string_free(ptr)
 
     def _require_handle(self) -> ctypes.c_void_p:
         if not self._handle:
@@ -260,14 +263,16 @@ class VoidVaultNativeClient:
     def open(self) -> "VoidVaultNativeClient":
         if self._handle is not None:
             return self
-        h = self._lib.vv_open(str(self._data_dir).encode("utf-8"), self._kdf)
+        h = self._lib.vv_open_with_audit(
+            self._auth_path.encode("utf-8"),
+            self._data_path.encode("utf-8"),
+            self._audit_path.encode("utf-8"),
+        )
         if not h:
             raise VoidVaultError(
-                f"Failed to open Void Vault in '{self._data_dir}' (directory locked or auth corrupted)"
+                f"Failed to open Void Vault in '{self._data_dir}'"
             )
         self._handle = ctypes.c_void_p(h)
-        if self._idle_timeout > 0:
-            self._lib.vv_set_idle_timeout(self._handle, ctypes.c_uint64(self._idle_timeout))
         return self
 
     def close(self) -> None:
@@ -284,17 +289,14 @@ class VoidVaultNativeClient:
     def is_initialized(self) -> bool:
         return self._lib.vv_is_initialized(self._require_handle()) == 1
 
-    def is_locked_out(self) -> bool:
-        return self._lib.vv_is_locked_out(self._require_handle()) == 1
-
     def setup_account(self, master_password: str) -> None:
         rc = self._lib.vv_setup_password(self._require_handle(), master_password.encode("utf-8"))
-        if rc != 0:
+        if rc != 1:
             raise VoidVaultError("setup_failed")
 
     def unlock(self, master_password: str) -> None:
         rc = self._lib.vv_unlock(self._require_handle(), master_password.encode("utf-8"))
-        if rc != 0:
+        if rc != 1:
             raise VoidVaultError("auth_failed")
 
     def lock(self) -> None:
@@ -305,103 +307,110 @@ class VoidVaultNativeClient:
         rc = self._lib.vv_set_secret(
             self._require_handle(), key.encode("utf-8"), value.encode("utf-8")
         )
-        if rc != 0:
+        if rc != 1:
             raise VoidVaultError("set_secret_failed")
 
     def get_secret(self, key: str) -> str:
-        out_ptr = ctypes.c_void_p()
+        buf = ctypes.create_string_buffer(65536)
         rc = self._lib.vv_get_secret(
-            self._require_handle(), key.encode("utf-8"), ctypes.byref(out_ptr)
+            self._require_handle(), key.encode("utf-8"), buf, ctypes.sizeof(buf)
         )
-        if rc != 0:
+        if rc != 1:
             raise VoidVaultError("get_secret_failed")
-        return self._consume_c_str(out_ptr)
+        return buf.value.decode("utf-8")
 
     def delete_secret(self, key: str) -> None:
         rc = self._lib.vv_delete_secret(self._require_handle(), key.encode("utf-8"))
-        if rc != 0:
+        if rc != 1:
             raise VoidVaultError("delete_secret_failed")
 
+    def list_keys(self) -> List[str]:
+        buf = ctypes.create_string_buffer(65536)
+        rc = self._lib.vv_list_keys(self._require_handle(), buf, ctypes.sizeof(buf))
+        if rc != 1:
+            raise VoidVaultError("list_keys_failed")
+        raw = buf.value.decode("utf-8").strip()
+        return [k for k in raw.split(",") if k] if raw else []
+
     def issue_token(self, app_id: str, scope: str = "read:*", ttl_seconds: int = 300) -> str:
-        out_ptr = ctypes.c_void_p()
+        buf = ctypes.create_string_buffer(1024)
         rc = self._lib.vv_issue_token(
             self._require_handle(),
             app_id.encode("utf-8"),
             scope.encode("utf-8"),
             ctypes.c_uint64(int(ttl_seconds)),
-            ctypes.byref(out_ptr),
+            buf,
+            ctypes.sizeof(buf),
         )
-        if rc != 0:
+        if rc != 1:
             raise VoidVaultError("issue_token_failed")
-        return self._consume_c_str(out_ptr)
+        return buf.value.decode("utf-8")
 
     def verify_token(self, token: str, app_id: str) -> TokenVerification:
-        out_scope = ctypes.c_void_p()
-        out_exp = ctypes.c_uint64(0)
         rc = self._lib.vv_verify_token(
             self._require_handle(),
             token.encode("utf-8"),
             app_id.encode("utf-8"),
-            ctypes.byref(out_scope),
-            ctypes.byref(out_exp),
         )
-        if rc != 0:
+        if rc != 1:
             raise VoidVaultError("invalid_token")
-        scope = self._consume_c_str(out_scope)
-        return TokenVerification(app_id=app_id, scope=scope, expires_at=int(out_exp.value))
+        return TokenVerification(app_id=app_id, scope="*", expires_at=0)
 
     def get_secret_with_token(self, token: str, app_id: str, key: str) -> str:
-        out_ptr = ctypes.c_void_p()
-        rc = self._lib.vv_token_get_secret(
+        buf = ctypes.create_string_buffer(65536)
+        rc = self._lib.vv_get_secret_with_token(
             self._require_handle(),
             token.encode("utf-8"),
             app_id.encode("utf-8"),
             key.encode("utf-8"),
-            ctypes.byref(out_ptr),
+            buf,
+            ctypes.sizeof(buf),
         )
-        if rc != 0:
+        if rc != 1:
             raise VoidVaultError("token_get_denied")
-        return self._consume_c_str(out_ptr)
+        return buf.value.decode("utf-8")
 
     def set_secret_with_token(self, token: str, app_id: str, key: str, value: str) -> None:
-        rc = self._lib.vv_token_set_secret(
+        rc = self._lib.vv_set_secret_with_token(
             self._require_handle(),
             token.encode("utf-8"),
             app_id.encode("utf-8"),
             key.encode("utf-8"),
             value.encode("utf-8"),
         )
-        if rc != 0:
+        if rc != 1:
             raise VoidVaultError("token_set_denied")
 
     def derive_app_key(self, token: str, app_id: str, subkey_id: int = 1) -> bytes:
-        out_ptr = ctypes.c_void_p()
+        buf = ctypes.create_string_buffer(128)
         rc = self._lib.vv_derive_app_key(
             self._require_handle(),
             token.encode("utf-8"),
             app_id.encode("utf-8"),
             ctypes.c_uint64(int(subkey_id)),
-            ctypes.byref(out_ptr),
+            buf,
+            ctypes.sizeof(buf),
         )
-        if rc != 0:
+        if rc != 1:
             raise VoidVaultError("derive_key_denied")
-        hex_str = self._consume_c_str(out_ptr)
-        return bytes.fromhex(hex_str)
+        return bytes.fromhex(buf.value.decode("utf-8"))
 
     def revoke_all_tokens(self) -> None:
-        if self._lib.vv_revoke_all_tokens(self._require_handle()) != 0:
+        if self._lib.vv_revoke_all_tokens(self._require_handle()) != 1:
             raise VoidVaultError("revoke_failed")
 
     def revoke_app_tokens(self, app_id: str) -> None:
-        if self._lib.vv_revoke_app_tokens(self._require_handle(), app_id.encode("utf-8")) != 0:
+        if self._lib.vv_revoke_app_tokens(self._require_handle(), app_id.encode("utf-8")) != 1:
             raise VoidVaultError("revoke_app_failed")
 
     def generate_recovery_key(self) -> str:
-        out_ptr = ctypes.c_void_p()
-        rc = self._lib.vv_generate_recovery_key(self._require_handle(), ctypes.byref(out_ptr))
-        if rc != 0:
+        buf = ctypes.create_string_buffer(128)
+        rc = self._lib.vv_generate_recovery_key(
+            self._require_handle(), buf, ctypes.sizeof(buf)
+        )
+        if rc != 1:
             raise VoidVaultError("generate_recovery_failed")
-        return self._consume_c_str(out_ptr)
+        return buf.value.decode("utf-8")
 
     def recover_with_key(self, recovery_key: str, new_master_password: str) -> None:
         rc = self._lib.vv_recover_with_emergency_key(
@@ -409,14 +418,19 @@ class VoidVaultNativeClient:
             recovery_key.encode("utf-8"),
             new_master_password.encode("utf-8"),
         )
-        if rc != 0:
+        if rc != 1:
             raise VoidVaultError("recovery_failed")
 
     def verify_audit(self) -> int:
         count = ctypes.c_size_t(0)
-        rc = self._lib.vv_verify_audit_log(self._require_handle(), ctypes.byref(count))
-        if rc != 0:
-            raise VoidVaultError("audit_tampered")
+        failed_line = ctypes.c_size_t(0)
+        rc = self._lib.vv_verify_audit_log(
+            self._audit_path.encode("utf-8"),
+            ctypes.byref(count),
+            ctypes.byref(failed_line),
+        )
+        if rc != 1:
+            raise VoidVaultError(f"audit_tampered at line {failed_line.value}")
         return int(count.value)
 
 

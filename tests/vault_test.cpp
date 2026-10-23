@@ -131,5 +131,72 @@ int main()
         check(vault.loadData(loaded) && loaded == original, "Re-encrypted data persists across restart");
     }
 
+    // --- v2.0: Tamper-Evident AuditLog, Idle Timeout Auto-Lock & Emergency Recovery Key ---
+    const std::string audit_file = dir.file("vault_test_audit.log");
+    const std::string recovered_pw = "EmergencyRecoveredPass999!";
+    {
+        AuditLog audit_log(audit_file);
+        Authorizer authorizer(auth_file);
+        Storage storage(test_file);
+        Vault vault(authorizer, storage);
+        vault.setAuditLog(&audit_log);
+        vault.setIdleTimeoutSeconds(60);
+
+        check(vault.authenticate(rotated_pw) && vault.unlock(), "Unlock with audit log attached");
+        check(!vault.checkIdleTimeout(), "Idle timeout does not trigger immediately");
+        check(vault.checkIdleTimeout(9999999999ULL) && !vault.isUnlocked(),
+              "Idle timeout auto-locks vault when elapsed >= timeout");
+
+        check(vault.authenticate(rotated_pw) && vault.unlock(), "Re-unlock after idle auto-lock");
+
+        std::string recovery_key;
+        check(vault.generateRecoveryKey(recovery_key) && recovery_key.rfind("VVREC-", 0) == 0,
+              "generateRecoveryKey produces VVREC- formatted key");
+        check(vault.hasRecoveryKey(), "hasRecoveryKey returns true after generation");
+        vault.lock();
+
+        // Trigger 5-attempt persistent lockout
+        for (int i = 0; i < Authorizer::MAX_FAILED_ATTEMPTS; ++i)
+        {
+            vault.authenticate("WrongAttemptPassword!");
+        }
+        check(authorizer.isLockedOut(), "Account is locked out after 5 failed attempts");
+        check(!vault.authenticate(rotated_pw), "Correct password rejected while locked out");
+
+        // Wrong recovery key rejected
+        check(!vault.recoverWithEmergencyKey("VVREC-0000-0000-0000-0000-0000-0000-0000-0000", recovered_pw) &&
+                  vault.lastError() == VaultError::InvalidRecoveryKey,
+              "Wrong Emergency Recovery Key is rejected");
+
+        // Recover locked-out account with valid Emergency Recovery Key
+        check(vault.recoverWithEmergencyKey(recovery_key, recovered_pw),
+              "recoverWithEmergencyKey unlocks account, resets lockout, and re-encrypts data");
+        check(!authorizer.isLockedOut() && vault.isUnlocked(),
+              "Vault is unlocked and lockout cleared after emergency recovery");
+        check(!vault.hasRecoveryKey(), "One-time recovery key envelope is consumed after use");
+
+        std::string loaded;
+        check(vault.loadData(loaded) && loaded == original,
+              "Original vault data preserved and readable under new recovered password");
+
+        // Replay of consumed recovery key must fail
+        check(!vault.recoverWithEmergencyKey(recovery_key, "AnotherPassword123!"),
+              "Consumed Emergency Recovery Key cannot be replayed");
+
+        // Verify hash-chained audit log integrity and tamper detection
+        std::size_t entry_count = 0;
+        std::size_t failed_line = 0;
+        check(audit_log.verify(&entry_count, &failed_line) && entry_count >= 5,
+              "AuditLog BLAKE2b-256 hash chain verifies intact");
+
+        std::string raw_log = tu::readAll(audit_file);
+        const std::size_t pos = raw_log.find("VAULT_UNLOCKED");
+        check(pos != std::string::npos, "AuditLog contains VAULT_UNLOCKED event");
+        raw_log[pos] = 'X';
+        tu::writeAll(audit_file, raw_log);
+        check(!audit_log.verify(&entry_count, &failed_line) && failed_line > 0,
+              "Tampered AuditLog entry breaks BLAKE2b hash chain and is detected");
+    }
+
     return tu::finish("vault");
 }
