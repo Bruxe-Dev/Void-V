@@ -41,7 +41,7 @@ jobs:
   windows-msys2:
     name: Windows MSYS2 UCRT64 (${{ matrix.build_type }})
     runs-on: windows-latest
-     defaults:
+    defaults:
       run:
         shell: msys2 {0}
     strategy:
