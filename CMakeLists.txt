@@ -130,6 +130,7 @@ add_library(void_vault_core STATIC
     src/vault/vault.cpp
     src/vault/broker.cpp
     src/vault/void_vault_c.cpp
+    src/security/audit_log.cpp
     src/security/auth.cpp
     src/security/encryption.cpp
     src/storage/storage.cpp
@@ -148,6 +149,34 @@ target_link_libraries(
     PUBLIC
     void_vault_options
     ${VOID_VAULT_SODIUM_LIBS}
+)
+
+add_library(void_vault_shared SHARED
+    src/vault/vault.cpp
+    src/vault/broker.cpp
+    src/vault/void_vault_c.cpp
+    src/security/audit_log.cpp
+    src/security/auth.cpp
+    src/security/encryption.cpp
+    src/storage/storage.cpp
+)
+target_compile_definitions(void_vault_shared PRIVATE VOID_VAULT_BUILD_SHARED)
+target_include_directories(
+    void_vault_shared
+    PUBLIC
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/src"
+    ${SODIUM_INCLUDE_DIRS}
+)
+target_link_libraries(
+    void_vault_shared
+    PRIVATE
+    void_vault_options
+    ${VOID_VAULT_SODIUM_LIBS}
+)
+set_target_properties(void_vault_shared PROPERTIES
+    OUTPUT_NAME "void_vault"
+    PREFIX ""
 )
 
 add_executable(void_vault src/main.cpp)

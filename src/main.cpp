@@ -13,6 +13,7 @@
 
 #include <sodium.h>
 
+#include "security/audit_log.hpp"
 #include "security/auth.hpp"
 #include "security/encryption.hpp"
 #include "security/process_hardening.hpp"
@@ -285,12 +286,15 @@ namespace
 
     void printHelp()
     {
-        std::cout << "Void Vault v1.0.0 — Authenticated Encrypted Local Vault & Capability Broker\n"
+        std::cout << "Void Vault v2.0.0 — Authenticated Encrypted Local Vault & Capability Broker\n"
                      "Usage: void_vault [--data-dir <directory>] [--kdf <interactive|moderate|sensitive>]\n"
+                     "                  [--idle-timeout <seconds>] [--verify-audit]\n"
                      "                  [--broker] [--version] [--help]\n"
-                     "  Stores vault_auth.dat (password hash + failed-attempt counter)\n"
-                     "  and vault_data.dat (XChaCha20-Poly1305 AEAD encrypted record) in the data directory\n"
-                     "  (default: current directory). Passwords are only read interactively or via --broker IPC.\n";
+                     "  Stores vault_auth.dat (password hash + failed-attempt counter),\n"
+                     "  vault_data.dat (XChaCha20-Poly1305 AEAD encrypted record),\n"
+                     "  vault_recovery.dat (optional Emergency Recovery Key capsule),\n"
+                     "  and vault_audit.log (BLAKE2b-256 hash-chained tamper-evident audit log)\n"
+                     "  in the data directory (default: current directory).\n";
     }
 
     void printMenu(bool unlocked)
@@ -298,20 +302,20 @@ namespace
         if (isInteractiveConsole())
         {
             std::cout << "\n============================================================\n"
-                      << "  VOID VAULT STATUS : [" << (unlocked ? "UNLOCKED" : "LOCKED") << "]\n"
+                      << "  VOID VAULT v2.0 STATUS : [" << (unlocked ? "UNLOCKED" : "LOCKED") << "]\n"
                       << "============================================================\n"
                       << "  [1] Unlock Vault              [6] Quit (Lock & Exit)\n"
                       << "  [2] Save Quick Text Note      [7] Change Master Password\n"
                       << "  [3] View All Stored Data      [8] Manage Named Secrets (Key-Value)\n"
-                      << "  [4] Lock Vault                [9] Generate App Auth Token\n"
-                      << "  [5] Check Vault Status\n"
+                      << "  [4] Lock Vault                [9] Generate / Revoke App Tokens\n"
+                      << "  [5] Check Vault Status        [10] Emergency Recovery & Audit Log\n"
                       << "------------------------------------------------------------\n";
         }
         else
         {
             std::cout << "\n[" << (unlocked ? "UNLOCKED" : "LOCKED") << "] "
                       << "1) unlock  2) save text  3) show data  4) lock  5) status  6) quit  "
-                      << "7) change password  8) secrets  9) app token\n";
+                      << "7) change password  8) secrets  9) app token  10) recovery/audit\n";
         }
     }
 
@@ -384,11 +388,17 @@ namespace
 
     // IPC Broker loop for external application modules ("Sign in with Void Vault"
     // & Scoped Secret Broker over standard input/output pipes).
-    int runBrokerMode(Authorizer &authorizer, Vault &vault, VaultBroker &broker)
+    int runBrokerMode(
+        Authorizer &authorizer,
+        Vault &vault,
+        VaultBroker &broker,
+        AuditLog &audit_log,
+        const std::string &recovery_path)
     {
         SecureBuffer line_buf;
         while (readSecureStreamLine(line_buf))
         {
+            vault.checkIdleTimeout();
             std::string line(line_buf.view().data(), line_buf.view().size());
             line_buf.clear();
             if (line.empty())
@@ -416,6 +426,7 @@ namespace
                     vault.canDecryptExistingData(pw.view()) &&
                     authorizer.setPassword(pw.view()))
                 {
+                    audit_log.append("ACCOUNT_INITIALIZED", "mode=broker");
                     std::cout << "OK initialized\n" << std::flush;
                 }
                 else
@@ -598,6 +609,62 @@ namespace
                     std::cout << "ERR revoke_failed\n" << std::flush;
                 }
             }
+            else if (cmd == "REVOKE_APP_TOKENS")
+            {
+                std::string app_id;
+                in >> app_id;
+                if (broker.revokeAppTokens(app_id))
+                {
+                    std::cout << "OK revoked_app\n" << std::flush;
+                }
+                else
+                {
+                    std::cout << "ERR revoke_app_failed\n" << std::flush;
+                }
+            }
+            else if (cmd == "GENERATE_RECOVERY_KEY")
+            {
+                std::string rec_key;
+                if (vault.generateRecoveryKey(recovery_path, rec_key))
+                {
+                    std::cout << "OK " << rec_key << '\n' << std::flush;
+                    wipe(rec_key);
+                }
+                else
+                {
+                    std::cout << "ERR generate_recovery_failed\n" << std::flush;
+                }
+            }
+            else if (cmd == "RECOVER_WITH_KEY")
+            {
+                std::string rec_hex, new_pw_hex;
+                in >> rec_hex >> new_pw_hex;
+                SecureBuffer rec_buf, new_pw_buf;
+                if (decodeHexToSecureBuffer(rec_hex, rec_buf) &&
+                    decodeHexToSecureBuffer(new_pw_hex, new_pw_buf) &&
+                    vault.recoverWithEmergencyKey(recovery_path, rec_buf.view(), new_pw_buf.view()))
+                {
+                    std::cout << "OK recovered\n" << std::flush;
+                }
+                else
+                {
+                    std::cout << "ERR recovery_failed\n" << std::flush;
+                }
+                wipe(rec_hex);
+                wipe(new_pw_hex);
+            }
+            else if (cmd == "VERIFY_AUDIT")
+            {
+                std::size_t count = 0;
+                if (audit_log.verifyChain(&count))
+                {
+                    std::cout << "OK " << count << '\n' << std::flush;
+                }
+                else
+                {
+                    std::cout << "ERR audit_tampered\n" << std::flush;
+                }
+            }
             else
             {
                 std::cout << "ERR unknown_command\n" << std::flush;
@@ -616,6 +683,8 @@ int main(int argc, char **argv)
     std::filesystem::path data_dir = ".";
     KdfProfile kdf_profile = KdfProfile::Interactive;
     bool broker_mode = false;
+    bool verify_audit_only = false;
+    std::uint64_t idle_timeout_seconds = 0;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -627,13 +696,31 @@ int main(int argc, char **argv)
         }
         if (arg == "--version" || arg == "-v")
         {
-            std::cout << "void_vault 1.0.0 (libsodium " << sodium_version_string() << ")\n";
+            std::cout << "void_vault 2.0.0 (libsodium " << sodium_version_string() << ")\n";
             return 0;
         }
         if (arg == "--broker")
         {
             broker_mode = true;
             continue;
+        }
+        if (arg == "--verify-audit")
+        {
+            verify_audit_only = true;
+            continue;
+        }
+        if (arg == "--idle-timeout" && i + 1 < argc)
+        {
+            try
+            {
+                idle_timeout_seconds = std::stoull(argv[++i]);
+                continue;
+            }
+            catch (...)
+            {
+                std::cerr << "Invalid --idle-timeout value\n";
+                return 2;
+            }
         }
         if (arg == "--data-dir" && i + 1 < argc)
         {
@@ -673,6 +760,19 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    AuditLog audit_log((data_dir / "vault_audit.log").string());
+    if (verify_audit_only)
+    {
+        std::size_t count = 0;
+        if (audit_log.verifyChain(&count))
+        {
+            std::cout << "Audit log verified OK (" << count << " hash-chained entries intact).\n";
+            return 0;
+        }
+        std::cerr << "ALERT: Audit log verification FAILED! Tampering or corruption detected.\n";
+        return 6;
+    }
+
     FileLock session_lock((data_dir / "vault_session").string());
     if (!session_lock.isLocked())
     {
@@ -680,6 +780,7 @@ int main(int argc, char **argv)
         return 5;
     }
 
+    const std::string recovery_path = (data_dir / "vault_recovery.dat").string();
     Authorizer authorizer((data_dir / "vault_auth.dat").string());
     Storage storage((data_dir / "vault_data.dat").string());
 
@@ -693,11 +794,15 @@ int main(int argc, char **argv)
 
     Vault vault(authorizer, storage);
     vault.setKdfProfile(kdf_profile);
+    vault.setAuditLog(&audit_log);
+    vault.setIdleTimeoutSeconds(idle_timeout_seconds);
+
     VaultBroker broker(vault);
+    broker.setAuditLog(&audit_log);
 
     if (broker_mode)
     {
-        return runBrokerMode(authorizer, vault, broker);
+        return runBrokerMode(authorizer, vault, broker, audit_log, recovery_path);
     }
 
     std::cout << "=== Void Vault ===\n";
@@ -709,27 +814,69 @@ int main(int argc, char **argv)
         {
             return rc;
         }
+        audit_log.append("ACCOUNT_INITIALIZED", "mode=interactive");
     }
 
     while (true)
     {
+        if (vault.checkIdleTimeout())
+        {
+            std::cout << "\n[Auto-Lock] Vault automatically locked due to inactivity.\n";
+        }
+
         if (authorizer.isLockedOut())
         {
             std::cerr << "Account is locked after " << Authorizer::MAX_FAILED_ATTEMPTS
-                      << " failed attempts (persists across restarts).\n"
-                         "Recovery: Delete vault_auth.dat, launch void_vault.exe again, and enter\n"
-                         "your ORIGINAL master password to recover your encrypted vault_data.dat.\n";
+                      << " failed attempts (persists across restarts).\n";
+            Storage rec_storage(recovery_path);
+            if (isInteractiveConsole() && rec_storage.exists())
+            {
+                std::cout << "\n[Emergency Recovery Key Capsule Detected!]\n"
+                          << "Would you like to unlock & reset your master password using your\n"
+                          << "Emergency Recovery Key (VVREC-XXXX-...)? (y/n): ";
+                std::string ans;
+                if (readLine("", ans) && (ans == "y" || ans == "Y" || ans == "yes"))
+                {
+                    SecureBuffer rec_key, new_pw, confirm_pw;
+                    if (readSecret("Enter Emergency Recovery Key: ", rec_key) &&
+                        readSecret("New Master Password (min 12 chars): ", new_pw) &&
+                        readSecret("Confirm New Master Password: ", confirm_pw))
+                    {
+                        if (!new_pw.constantTimeEquals(confirm_pw))
+                        {
+                            std::cout << "Recovery aborted: New passwords do not match.\n";
+                        }
+                        else if (vault.recoverWithEmergencyKey(recovery_path, rec_key.view(), new_pw.view()))
+                        {
+                            std::cout << "Emergency recovery succeeded! Master password updated and vault unlocked.\n";
+                            continue;
+                        }
+                        else
+                        {
+                            std::cout << "Emergency recovery failed: " << vaultErrorMessage(vault.lastError()) << '\n';
+                        }
+                    }
+                }
+            }
+            std::cerr << "Recovery: Use an Emergency Recovery Key, or delete vault_auth.dat, launch\n"
+                         "void_vault.exe again, and enter your ORIGINAL master password to recover\n"
+                         "your encrypted vault_data.dat.\n";
             vault.lock();
             return 4;
         }
 
         printMenu(vault.isUnlocked());
         std::string choice;
-        if (!readLine("Select option (1-9): > ", choice))
+        if (!readLine("Select option (1-10): > ", choice))
         {
             std::cout << "\nInput closed. Locking and exiting.\n";
             vault.lock();
             return 0;
+        }
+
+        if (vault.checkIdleTimeout())
+        {
+            std::cout << "\n[Auto-Lock] Vault automatically locked due to inactivity.\n";
         }
 
         if (choice == "1" || choice == "unlock")
@@ -828,10 +975,14 @@ int main(int argc, char **argv)
         }
         else if (choice == "5" || choice == "status")
         {
+            std::size_t audit_entries = 0;
+            const bool audit_ok = audit_log.verifyChain(&audit_entries);
             std::cout << "Unlocked: " << (vault.isUnlocked() ? "yes" : "no")
                       << " | failed attempts: " << authorizer.failedAttempts() << '/'
                       << Authorizer::MAX_FAILED_ATTEMPTS
-                      << " | data file present: " << (storage.exists() ? "yes" : "no") << '\n';
+                      << " | data file present: " << (storage.exists() ? "yes" : "no")
+                      << " | audit log: " << (audit_ok ? "intact" : "TAMPERED")
+                      << " (" << audit_entries << " entries)\n";
         }
         else if (choice == "6" || choice == "q" || choice == "quit")
         {
@@ -966,16 +1117,33 @@ int main(int argc, char **argv)
             }
             if (isInteractiveConsole())
             {
-                std::cout << "\n--- Generate 'Sign in with Void Vault' App Token ---\n"
+                std::cout << "\n--- 'Sign in with Void Vault' App Token Manager ---\n"
                           << "  Scope examples:\n"
                           << "    *               (full access to all secrets)\n"
                           << "    read:*          (read-only access to all secrets)\n"
                           << "    read:trader.*   (read-only access to keys starting with 'trader.')\n"
-                          << "    key:date        (read/write access only to key 'date')\n";
+                          << "    key:date        (read/write access only to key 'date')\n"
+                          << "  Tip: Enter 'revoke' as the Application ID to revoke tokens.\n";
             }
-            std::string app_id, scope;
-            if (!readLine("Application ID (e.g. void-trader): ", app_id) ||
-                !readLine("Allowed scope (e.g. read:trader.* or *): ", scope))
+            std::string app_id;
+            if (!readLine("Application ID (e.g. void-trader, or 'revoke'): ", app_id))
+            {
+                continue;
+            }
+            if (app_id == "revoke")
+            {
+                std::string target_app;
+                if (!readLine("App ID to revoke (or '*' to revoke ALL apps): ", target_app))
+                {
+                    continue;
+                }
+                const bool ok = (target_app == "*") ? broker.revokeAllTokens()
+                                                    : broker.revokeAppTokens(target_app);
+                std::cout << (ok ? "Tokens revoked immediately.\n" : "Failed to revoke tokens.\n");
+                continue;
+            }
+            std::string scope;
+            if (!readLine("Allowed scope (e.g. read:trader.* or *): ", scope))
             {
                 continue;
             }
@@ -989,9 +1157,85 @@ int main(int argc, char **argv)
                 std::cout << "Failed to issue token (app_id and scope must not contain spaces).\n";
             }
         }
+        else if (choice == "10" || choice == "recovery" || choice == "audit")
+        {
+            if (isInteractiveConsole())
+            {
+                std::cout << "\n--- Emergency Recovery & Tamper-Evident Audit Log ---\n"
+                          << "  [1] Generate One-Time Emergency Recovery Key (requires unlocked vault)\n"
+                          << "  [2] Recover Account / Reset Forgotten Password using Emergency Key\n"
+                          << "  [3] Verify Tamper-Evident Audit Log Chain (vault_audit.log)\n"
+                          << "  [4] Return to main menu\n";
+            }
+            std::string sub;
+            if (!readLine("Recovery/Audit [1=generate / 2=recover / 3=verify-audit / 4=back]: ", sub))
+            {
+                continue;
+            }
+            if (sub == "1" || sub == "generate")
+            {
+                if (!vault.isUnlocked())
+                {
+                    std::cout << "Rejected: " << vaultErrorMessage(VaultError::Locked) << '\n';
+                    continue;
+                }
+                std::string rec_key;
+                if (vault.generateRecoveryKey(recovery_path, rec_key))
+                {
+                    std::cout << "\n============================================================\n"
+                              << "  ONE-TIME EMERGENCY RECOVERY KEY (WRITE THIS DOWN OFFLINE!)\n"
+                              << "============================================================\n"
+                              << "  " << rec_key << "\n"
+                              << "============================================================\n"
+                              << "Keep this key in a safe place. It can recover your vault even if\n"
+                              << "you forget your master password or lock out your account.\n";
+                    wipe(rec_key);
+                }
+                else
+                {
+                    std::cout << "Failed to generate recovery key: " << vaultErrorMessage(vault.lastError()) << '\n';
+                }
+            }
+            else if (sub == "2" || sub == "recover")
+            {
+                SecureBuffer rec_key, new_pw, confirm_pw;
+                if (!readSecret("Enter Emergency Recovery Key (VVREC-...): ", rec_key) ||
+                    !readSecret("New Master Password (min 12 chars): ", new_pw) ||
+                    !readSecret("Confirm New Master Password: ", confirm_pw))
+                {
+                    continue;
+                }
+                if (!new_pw.constantTimeEquals(confirm_pw))
+                {
+                    std::cout << "Recovery aborted: New passwords do not match.\n";
+                    continue;
+                }
+                if (vault.recoverWithEmergencyKey(recovery_path, rec_key.view(), new_pw.view()))
+                {
+                    std::cout << "Emergency recovery complete! Master password reset, data re-encrypted, and vault unlocked.\n";
+                }
+                else
+                {
+                    std::cout << "Recovery failed: " << vaultErrorMessage(vault.lastError()) << '\n';
+                }
+            }
+            else if (sub == "3" || sub == "verify-audit")
+            {
+                std::size_t count = 0;
+                if (audit_log.verifyChain(&count))
+                {
+                    std::cout << "Audit log verified OK (" << count << " BLAKE2b-256 hash-chained entries intact).\n";
+                }
+                else
+                {
+                    std::cout << "WARNING: Audit log verification FAILED! Tampering or corruption detected.\n";
+                }
+            }
+        }
         else if (!choice.empty())
         {
             std::cout << "Unknown option.\n";
         }
     }
 }
+
