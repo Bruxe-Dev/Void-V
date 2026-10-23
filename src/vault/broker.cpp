@@ -14,6 +14,7 @@ namespace
     constexpr char TOKEN_PREFIX[] = "VVTOK1.";
     constexpr std::size_t TOKEN_PREFIX_SIZE = 7;
     constexpr char INTERNAL_BROKER_KEY_NAME[] = "__vv_internal_broker_key__";
+    constexpr char INTERNAL_APP_GEN_PREFIX[] = "__vv_app_gen_";
     constexpr char LEGACY_RAW_KEY_NAME[] = "default";
 
     std::uint64_t currentUnixTime() noexcept
@@ -124,6 +125,45 @@ namespace
         }
         return true;
     }
+
+    std::string appGenKey(std::string_view app_id)
+    {
+        std::string k(INTERNAL_APP_GEN_PREFIX);
+        k.append(app_id.data(), app_id.size());
+        return k;
+    }
+
+    // Derives the HMAC signing key for a specific (app_id, app_generation) pair.
+    bool deriveAppSigningKey(
+        const unsigned char master_key[32],
+        std::string_view app_id,
+        std::string_view app_gen,
+        unsigned char out_sign_key[crypto_auth_hmacsha512256_KEYBYTES])
+    {
+        unsigned char root_sign[crypto_auth_hmacsha512256_KEYBYTES]{};
+        if (crypto_kdf_derive_from_key(
+                root_sign,
+                sizeof(root_sign),
+                1ULL,
+                "VVTOKENS",
+                master_key) != 0)
+        {
+            return false;
+        }
+        std::string ctx;
+        ctx.reserve(app_id.size() + app_gen.size() + 2);
+        ctx.append(app_id.data(), app_id.size());
+        ctx.push_back(':');
+        ctx.append(app_gen.data(), app_gen.size());
+
+        crypto_auth_hmacsha512256(
+            out_sign_key,
+            reinterpret_cast<const unsigned char *>(ctx.data()),
+            ctx.size(),
+            root_sign);
+        sodium_memzero(root_sign, sizeof(root_sign));
+        return true;
+    }
 }
 
 VaultBroker::VaultBroker(Vault &vault)
@@ -132,6 +172,14 @@ VaultBroker::VaultBroker(Vault &vault)
 }
 
 VaultBroker::~VaultBroker() = default;
+
+void VaultBroker::recordAudit(std::string_view event, std::string_view actor, std::string_view target)
+{
+    if (vault_.auditLog() != nullptr)
+    {
+        (void)vault_.auditLog()->append(event, actor, target);
+    }
+}
 
 bool VaultBroker::isValidKeyName(std::string_view key) noexcept
 {
@@ -209,6 +257,7 @@ bool VaultBroker::loadStore(
     has_master_key = false;
     sodium_memzero(master_key, 32);
 
+    (void)vault_.checkIdleTimeout();
     if (!vault_.isUnlocked())
     {
         return false;
@@ -378,6 +427,10 @@ bool VaultBroker::setSecret(std::string_view key, std::string_view value)
     {
         wipeString(kv.value);
     }
+    if (ok)
+    {
+        recordAudit("SECRET_SAVED", "owner", key);
+    }
     return ok;
 }
 
@@ -406,6 +459,10 @@ bool VaultBroker::getSecret(std::string_view key, std::string &out_value)
             found = true;
         }
         wipeString(kv.value);
+    }
+    if (found)
+    {
+        recordAudit("SECRET_READ", "owner", key);
     }
     return found;
 }
@@ -450,6 +507,10 @@ bool VaultBroker::deleteSecret(std::string_view key)
     {
         wipeString(kv.value);
     }
+    if (ok)
+    {
+        recordAudit("SECRET_DELETED", "owner", key);
+    }
     return ok;
 }
 
@@ -469,7 +530,10 @@ bool VaultBroker::listKeys(std::vector<std::string> &out_keys)
     out_keys.reserve(entries.size());
     for (auto &kv : entries)
     {
-        out_keys.push_back(kv.key);
+        if (kv.key.rfind("__vv_", 0) != 0)
+        {
+            out_keys.push_back(kv.key);
+        }
         wipeString(kv.value);
     }
     std::sort(out_keys.begin(), out_keys.end());
@@ -496,19 +560,20 @@ bool VaultBroker::issueToken(
         sodium_memzero(master_key, sizeof(master_key));
         return false;
     }
+
+    std::string app_gen = "0";
+    const std::string gen_key = appGenKey(app_id);
     for (auto &kv : entries)
     {
+        if (kv.key == gen_key)
+        {
+            app_gen = kv.value;
+        }
         wipeString(kv.value);
     }
 
-    // Derive the dedicated HMAC signing subkey (subkey_id = 1, context = "VVTOKENS")
     unsigned char sign_key[crypto_auth_hmacsha512256_KEYBYTES]{};
-    if (crypto_kdf_derive_from_key(
-            sign_key,
-            sizeof(sign_key),
-            1ULL,
-            "VVTOKENS",
-            master_key) != 0)
+    if (!deriveAppSigningKey(master_key, app_id, app_gen, sign_key))
     {
         sodium_memzero(master_key, sizeof(master_key));
         return false;
@@ -545,6 +610,7 @@ bool VaultBroker::issueToken(
     out_token.append(payload_hex);
     out_token.push_back('.');
     out_token.append(mac_hex);
+    recordAudit("TOKEN_ISSUED", app_id, scope);
     return true;
 }
 
@@ -588,18 +654,20 @@ bool VaultBroker::verifyToken(
         }
         return false;
     }
+
+    std::string app_gen = "0";
+    const std::string gen_key = appGenKey(expected_app_id);
     for (auto &kv : entries)
     {
+        if (kv.key == gen_key)
+        {
+            app_gen = kv.value;
+        }
         wipeString(kv.value);
     }
 
     unsigned char sign_key[crypto_auth_hmacsha512256_KEYBYTES]{};
-    if (crypto_kdf_derive_from_key(
-            sign_key,
-            sizeof(sign_key),
-            1ULL,
-            "VVTOKENS",
-            master_key) != 0)
+    if (!deriveAppSigningKey(master_key, expected_app_id, app_gen, sign_key))
     {
         sodium_memzero(master_key, sizeof(master_key));
         return false;
@@ -615,6 +683,7 @@ bool VaultBroker::verifyToken(
 
     if (mac_ok != 0)
     {
+        recordAudit("TOKEN_INVALID_MAC", expected_app_id, "verify");
         return false;
     }
 
@@ -643,6 +712,7 @@ bool VaultBroker::verifyToken(
     const std::uint64_t now = now_unix != 0 ? now_unix : currentUnixTime();
     if (now > expires || app != expected_app_id)
     {
+        recordAudit("TOKEN_EXPIRED_OR_MISMATCH", expected_app_id, scope);
         return false;
     }
 
@@ -651,6 +721,63 @@ bool VaultBroker::verifyToken(
     out_claims.app_id = std::move(app);
     out_claims.scope = std::move(scope);
     return true;
+}
+
+bool VaultBroker::revokeAppTokens(std::string_view app_id)
+{
+    if (!isSafeIdentifier(app_id))
+    {
+        return false;
+    }
+
+    std::vector<KeyValue> entries;
+    unsigned char master_key[32]{};
+    bool has_key = false;
+    if (!loadStore(entries, master_key, has_key))
+    {
+        sodium_memzero(master_key, sizeof(master_key));
+        return false;
+    }
+    if (!has_key)
+    {
+        randombytes_buf(master_key, sizeof(master_key));
+    }
+
+    const std::string gen_key = appGenKey(app_id);
+    bool updated = false;
+    for (auto &kv : entries)
+    {
+        if (kv.key == gen_key)
+        {
+            std::uint64_t g = 0;
+            for (char c : kv.value)
+            {
+                if (c >= '0' && c <= '9')
+                {
+                    g = g * 10 + static_cast<std::uint64_t>(c - '0');
+                }
+            }
+            kv.value = std::to_string(g + 1);
+            updated = true;
+            break;
+        }
+    }
+    if (!updated)
+    {
+        entries.push_back(KeyValue{gen_key, "1"});
+    }
+
+    const bool ok = saveStore(entries, master_key);
+    sodium_memzero(master_key, sizeof(master_key));
+    for (auto &kv : entries)
+    {
+        wipeString(kv.value);
+    }
+    if (ok)
+    {
+        recordAudit("APP_TOKENS_REVOKED", app_id, "revoke_app");
+    }
+    return ok;
 }
 
 bool VaultBroker::revokeAllTokens()
@@ -670,6 +797,10 @@ bool VaultBroker::revokeAllTokens()
     {
         wipeString(kv.value);
     }
+    if (ok)
+    {
+        recordAudit("ALL_TOKENS_REVOKED", "owner", "all");
+    }
     return ok;
 }
 
@@ -687,9 +818,15 @@ bool VaultBroker::getSecretWithToken(
     }
     if (!scopeAllowsRead(claims.scope, key))
     {
+        recordAudit("TOKEN_SCOPE_DENIED_READ", app_id, key);
         return false;
     }
-    return getSecret(key, out_value);
+    const bool ok = getSecret(key, out_value);
+    if (ok)
+    {
+        recordAudit("TOKEN_SECRET_READ", app_id, key);
+    }
+    return ok;
 }
 
 bool VaultBroker::setSecretWithToken(
@@ -706,9 +843,15 @@ bool VaultBroker::setSecretWithToken(
     }
     if (!scopeAllowsWrite(claims.scope, key))
     {
+        recordAudit("TOKEN_SCOPE_DENIED_WRITE", app_id, key);
         return false;
     }
-    return setSecret(key, value);
+    const bool ok = setSecret(key, value);
+    if (ok)
+    {
+        recordAudit("TOKEN_SECRET_WRITTEN", app_id, key);
+    }
+    return ok;
 }
 
 bool VaultBroker::deriveAppKey(
@@ -770,5 +913,6 @@ bool VaultBroker::deriveAppKey(
 
     out_key_hex = toHex(derived, sizeof(derived));
     sodium_memzero(derived, sizeof(derived));
+    recordAudit("APP_KEY_DERIVED", app_id, std::to_string(subkey_id));
     return true;
 }

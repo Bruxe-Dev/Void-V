@@ -72,8 +72,12 @@ public:
         CapabilityClaims& out_claims,
         std::uint64_t now_unix = 0);
 
-    // Revokes all previously issued tokens immediately by rotating the internal
-    // 256-bit broker signing key inside the encrypted vault.
+    // Revokes all tokens issued specifically for `app_id` without invalidating
+    // tokens belonging to other applications.
+    bool revokeAppTokens(std::string_view app_id);
+
+    // Revokes all previously issued tokens across all apps immediately by
+    // rotating the internal 256-bit broker signing key inside the encrypted vault.
     bool revokeAllTokens();
 
     // --- Scoped Secret Access for External Modules Using a Token ---
@@ -113,6 +117,7 @@ private:
         std::string value;
     };
 
+    void recordAudit(std::string_view event, std::string_view actor, std::string_view target);
     bool loadStore(std::vector<KeyValue>& entries, unsigned char master_key[32], bool& has_master_key);
     bool saveStore(const std::vector<KeyValue>& entries, const unsigned char master_key[32]);
     bool ensureBrokerKey(std::vector<KeyValue>& entries, unsigned char master_key[32]);

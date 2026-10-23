@@ -319,6 +319,31 @@ bool Authorizer::changePassword(std::string_view current_password, std::string_v
     return true;
 }
 
+bool Authorizer::forceResetPassword(std::string_view new_password) {
+    if (storage_error || !isPasswordAcceptable(new_password)) {
+        return false;
+    }
+
+    std::string candidate_hash;
+    if (!hashPassword(new_password, candidate_hash)) {
+        return false;
+    }
+
+    if (!persist(candidate_hash, 0, true)) {
+        return false;
+    }
+
+    if (!password_hash.empty()) {
+        sodium_memzero(password_hash.data(), password_hash.size());
+    }
+    password_hash = std::move(candidate_hash);
+    password_initialized = true;
+    failed_attempts = 0;
+    locked_out = false;
+    authorized = true;
+    return true;
+}
+
 bool Authorizer::isAuthorized() const {
     return authorized;
 }

@@ -45,6 +45,7 @@ public:
     bool setPassword(std::string_view new_password);
     bool verifyPassword(std::string_view attempted_password);
     bool changePassword(std::string_view current_password, std::string_view new_password);
+    bool forceResetPassword(std::string_view new_password);
 
     bool isAuthorized() const;
     void revokeAuthorization();
