@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "void-vault"
+version = "2.0.0"
+description = "Zero-Knowledge Local Secret Vault & Capability Broker SDK (VaultApp Abstraction + Native C-ABI & IPC Clients)"
+readme = "../../DEVELOPER_GUIDE.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+    { name = "Void Vault Contributors" }
+]
+keywords = ["security", "vault", "encryption", "libsodium", "xchacha20-poly1305", "argon2id", "zero-knowledge"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security :: Cryptography",
+]
+
+[tool.setuptools]
+py-modules = ["void_vault"]

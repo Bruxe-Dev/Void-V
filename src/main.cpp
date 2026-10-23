@@ -392,8 +392,7 @@ namespace
         Authorizer &authorizer,
         Vault &vault,
         VaultBroker &broker,
-        AuditLog &audit_log,
-        const std::string &recovery_path)
+        AuditLog &audit_log)
     {
         SecureBuffer line_buf;
         while (readSecureStreamLine(line_buf))
@@ -426,7 +425,7 @@ namespace
                     vault.canDecryptExistingData(pw.view()) &&
                     authorizer.setPassword(pw.view()))
                 {
-                    audit_log.append("ACCOUNT_INITIALIZED", "mode=broker");
+                    audit_log.append("ACCOUNT_INITIALIZED", "broker", "auth");
                     std::cout << "OK initialized\n" << std::flush;
                 }
                 else
@@ -625,7 +624,7 @@ namespace
             else if (cmd == "GENERATE_RECOVERY_KEY")
             {
                 std::string rec_key;
-                if (vault.generateRecoveryKey(recovery_path, rec_key))
+                if (vault.generateRecoveryKey(rec_key))
                 {
                     std::cout << "OK " << rec_key << '\n' << std::flush;
                     wipe(rec_key);
@@ -642,7 +641,7 @@ namespace
                 SecureBuffer rec_buf, new_pw_buf;
                 if (decodeHexToSecureBuffer(rec_hex, rec_buf) &&
                     decodeHexToSecureBuffer(new_pw_hex, new_pw_buf) &&
-                    vault.recoverWithEmergencyKey(recovery_path, rec_buf.view(), new_pw_buf.view()))
+                    vault.recoverWithEmergencyKey(rec_buf.view(), new_pw_buf.view()))
                 {
                     std::cout << "OK recovered\n" << std::flush;
                 }
@@ -656,7 +655,7 @@ namespace
             else if (cmd == "VERIFY_AUDIT")
             {
                 std::size_t count = 0;
-                if (audit_log.verifyChain(&count))
+                if (audit_log.verify(&count))
                 {
                     std::cout << "OK " << count << '\n' << std::flush;
                 }
@@ -764,7 +763,7 @@ int main(int argc, char **argv)
     if (verify_audit_only)
     {
         std::size_t count = 0;
-        if (audit_log.verifyChain(&count))
+        if (audit_log.verify(&count))
         {
             std::cout << "Audit log verified OK (" << count << " hash-chained entries intact).\n";
             return 0;
@@ -780,7 +779,6 @@ int main(int argc, char **argv)
         return 5;
     }
 
-    const std::string recovery_path = (data_dir / "vault_recovery.dat").string();
     Authorizer authorizer((data_dir / "vault_auth.dat").string());
     Storage storage((data_dir / "vault_data.dat").string());
 
@@ -798,11 +796,10 @@ int main(int argc, char **argv)
     vault.setIdleTimeoutSeconds(idle_timeout_seconds);
 
     VaultBroker broker(vault);
-    broker.setAuditLog(&audit_log);
 
     if (broker_mode)
     {
-        return runBrokerMode(authorizer, vault, broker, audit_log, recovery_path);
+        return runBrokerMode(authorizer, vault, broker, audit_log);
     }
 
     std::cout << "=== Void Vault ===\n";
@@ -814,7 +811,7 @@ int main(int argc, char **argv)
         {
             return rc;
         }
-        audit_log.append("ACCOUNT_INITIALIZED", "mode=interactive");
+        audit_log.append("ACCOUNT_INITIALIZED", "interactive", "auth");
     }
 
     while (true)
@@ -828,8 +825,7 @@ int main(int argc, char **argv)
         {
             std::cerr << "Account is locked after " << Authorizer::MAX_FAILED_ATTEMPTS
                       << " failed attempts (persists across restarts).\n";
-            Storage rec_storage(recovery_path);
-            if (isInteractiveConsole() && rec_storage.exists())
+            if (isInteractiveConsole() && vault.hasRecoveryKey())
             {
                 std::cout << "\n[Emergency Recovery Key Capsule Detected!]\n"
                           << "Would you like to unlock & reset your master password using your\n"
@@ -846,7 +842,7 @@ int main(int argc, char **argv)
                         {
                             std::cout << "Recovery aborted: New passwords do not match.\n";
                         }
-                        else if (vault.recoverWithEmergencyKey(recovery_path, rec_key.view(), new_pw.view()))
+                        else if (vault.recoverWithEmergencyKey(rec_key.view(), new_pw.view()))
                         {
                             std::cout << "Emergency recovery succeeded! Master password updated and vault unlocked.\n";
                             continue;
@@ -976,7 +972,7 @@ int main(int argc, char **argv)
         else if (choice == "5" || choice == "status")
         {
             std::size_t audit_entries = 0;
-            const bool audit_ok = audit_log.verifyChain(&audit_entries);
+            const bool audit_ok = audit_log.verify(&audit_entries);
             std::cout << "Unlocked: " << (vault.isUnlocked() ? "yes" : "no")
                       << " | failed attempts: " << authorizer.failedAttempts() << '/'
                       << Authorizer::MAX_FAILED_ATTEMPTS
@@ -1180,7 +1176,7 @@ int main(int argc, char **argv)
                     continue;
                 }
                 std::string rec_key;
-                if (vault.generateRecoveryKey(recovery_path, rec_key))
+                if (vault.generateRecoveryKey(rec_key))
                 {
                     std::cout << "\n============================================================\n"
                               << "  ONE-TIME EMERGENCY RECOVERY KEY (WRITE THIS DOWN OFFLINE!)\n"
@@ -1210,7 +1206,7 @@ int main(int argc, char **argv)
                     std::cout << "Recovery aborted: New passwords do not match.\n";
                     continue;
                 }
-                if (vault.recoverWithEmergencyKey(recovery_path, rec_key.view(), new_pw.view()))
+                if (vault.recoverWithEmergencyKey(rec_key.view(), new_pw.view()))
                 {
                     std::cout << "Emergency recovery complete! Master password reset, data re-encrypted, and vault unlocked.\n";
                 }
@@ -1222,7 +1218,7 @@ int main(int argc, char **argv)
             else if (sub == "3" || sub == "verify-audit")
             {
                 std::size_t count = 0;
-                if (audit_log.verifyChain(&count))
+                if (audit_log.verify(&count))
                 {
                     std::cout << "Audit log verified OK (" << count << " BLAKE2b-256 hash-chained entries intact).\n";
                 }
