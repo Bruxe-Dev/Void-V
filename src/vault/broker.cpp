@@ -167,9 +167,9 @@ namespace
 }
 
 VaultBroker::VaultBroker(Vault &vault)
-    : vault_(vault),
-      expiry_thread_(&VaultBroker::runExpiryWorker, this)
+    : vault_(vault)
 {
+    expiry_thread_ = std::thread(&VaultBroker::runExpiryWorker, this);
 }
 
 VaultBroker::~VaultBroker()
@@ -183,7 +183,7 @@ VaultBroker::~VaultBroker()
     {
         expiry_thread_.join();
     }
-};
+}
 
 void VaultBroker::recordAudit(std::string_view event, std::string_view actor, std::string_view target)
 {
@@ -950,15 +950,16 @@ void VaultBroker::runExpiryWorker()
     while (!stop_expiry_thread_)
     {
         if (ephemeral_cv_.wait_for(
-
-                lock, std::chrono::seconds(1), [this]
-                { return stop_expiry_thread_; }))
+                lock,
+                std::chrono::seconds(1),
+                [this] { return stop_expiry_thread_; }))
         {
             break;
         }
         purgeExpiredEphemeralSecrets(Clock::now());
     }
 }
+
 bool VaultBroker::setEphemeralSecret(
     std::string_view key,
     std::string_view value,
@@ -991,4 +992,65 @@ bool VaultBroker::setEphemeralSecret(
     ephemeral_cv_.notify_one();
     recordAudit("EPHEMERAL_SECRET_SAVED", "owner", key);
     return true;
+}
+
+bool VaultBroker::getEphemeralSecret(
+    std::string_view key,
+    std::string &out_value)
+{
+    if (!isValidKeyName(key))
+    {
+        return false;
+    }
+
+    (void)vault_.checkIdleTimeout();
+    if (!vault_.isUnlocked())
+    {
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(ephemeral_mutex_);
+        purgeExpiredEphemeralSecrets(Clock::now());
+
+        const auto it = ephemeral_secrets_.find(std::string(key));
+        if (it == ephemeral_secrets_.end())
+        {
+            return false;
+        }
+
+        const std::string_view value = it->second.value.view();
+        out_value.assign(value.data(), value.size());
+    }
+
+    recordAudit("EPHEMERAL_SECRET_READ", "owner", key);
+    return true;
+}
+
+bool VaultBroker::deleteEphemeralSecret(std::string_view key)
+{
+    if (!isValidKeyName(key))
+    {
+        return false;
+    }
+
+    bool removed = false;
+    {
+        std::lock_guard<std::mutex> lock(ephemeral_mutex_);
+        purgeExpiredEphemeralSecrets(Clock::now());
+
+        const auto it = ephemeral_secrets_.find(std::string(key));
+        if (it != ephemeral_secrets_.end())
+        {
+            it->second.value.clear();
+            ephemeral_secrets_.erase(it);
+            removed = true;
+        }
+    }
+
+    if (removed)
+    {
+        recordAudit("EPHEMERAL_SECRET_DELETED", "owner", key);
+    }
+    return removed;
 }

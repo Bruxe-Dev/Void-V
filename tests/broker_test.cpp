@@ -2,7 +2,9 @@
 #include "void_vault_c.h"
 
 #include <cstring>
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "test_util.hpp"
@@ -48,6 +50,34 @@ int main()
         check(broker.getSecret("trader.mt5_password", val) && val == "MyBrokerSecret!99", "getSecret retrieves exact value");
         check(broker.setSecret("trader.mt5_password", "UpdatedBrokerSecret!00"), "Overwrite existing key");
         check(broker.getSecret("trader.mt5_password", val) && val == "UpdatedBrokerSecret!00", "Updated value retrieved");
+
+        check(broker.setEphemeralSecret("session.temporary", "short-lived", 1),
+              "Save in-memory ephemeral secret");
+        check(broker.getEphemeralSecret("session.temporary", val) && val == "short-lived",
+              "Read ephemeral secret before expiry");
+        check(!broker.setEphemeralSecret("session.zero_ttl", "invalid", 0),
+              "Reject zero ephemeral TTL");
+        check(!broker.setEphemeralSecret(
+                  "session.long_ttl",
+                  "invalid",
+                  VaultBroker::MAX_EPHEMERAL_TTL_SECONDS + 1),
+              "Reject ephemeral TTL above limit");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+        check(!broker.getEphemeralSecret("session.temporary", val),
+              "Reject ephemeral secret after expiry");
+
+        check(broker.setEphemeralSecret("session.delete", "remove-me", 30),
+              "Save another ephemeral secret");
+        check(broker.deleteEphemeralSecret("session.delete"),
+              "Delete ephemeral secret before expiry");
+        check(!broker.getEphemeralSecret("session.delete", val),
+              "Deleted ephemeral secret is no longer readable");
+
+        vault.lock();
+        check(!broker.getEphemeralSecret("session.temporary", val),
+              "Ephemeral reads rejected while vault is locked");
+        check(vault.authenticate(password) && vault.unlock(),
+              "Vault unlocked after ephemeral tests");
     }
 
     // --- 2. "Sign in with Void Vault" Scoped Capability Tokens & App Isolation ---

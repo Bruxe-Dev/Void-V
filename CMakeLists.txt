@@ -149,6 +149,7 @@ target_link_libraries(
     PUBLIC
     void_vault_options
     ${VOID_VAULT_SODIUM_LIBS}
+    Threads::Threads
 )
 
 add_library(void_vault_shared SHARED
@@ -173,6 +174,7 @@ target_link_libraries(
     PRIVATE
     void_vault_options
     ${VOID_VAULT_SODIUM_LIBS}
+    Threads::Threads
 )
 set_target_properties(void_vault_shared PROPERTIES
     OUTPUT_NAME "void_vault"

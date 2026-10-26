@@ -2,14 +2,14 @@
 #define VOID_VAULT_BROKER_HPP
 
 #include <cstdint>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <string>
 #include <string_view>
-#include <vector>
-#include <chrono>
-#include <unordered_map>
-#include <mutex>
 #include <thread>
-#include <condition_variable>
+#include <unordered_map>
+#include <vector>
 
 #include "vault.hpp"
 #include "../security/secure_buffer.hpp"
@@ -128,34 +128,33 @@ public:
     static bool scopeAllowsWrite(std::string_view scope, std::string_view key) noexcept;
 
 private:
+    struct KeyValue {
+        std::string key;
+        std::string value;
+    };
+
     using Clock = std::chrono::steady_clock;
 
-    struct EphemeralSecret
-    {
+    struct EphemeralSecret {
         SecureBuffer value;
         Clock::time_point expires_at;
     };
 
+    void purgeExpiredEphemeralSecrets(Clock::time_point now);
+    void runExpiryWorker();
+
+    void recordAudit(std::string_view event, std::string_view actor, std::string_view target);
+    bool loadStore(std::vector<KeyValue>& entries, unsigned char master_key[32], bool& has_master_key);
+    bool saveStore(const std::vector<KeyValue>& entries, const unsigned char master_key[32]);
+    bool ensureBrokerKey(std::vector<KeyValue>& entries, unsigned char master_key[32]);
+
+    Vault& vault_;
     std::unordered_map<std::string, EphemeralSecret> ephemeral_secrets_;
     std::mutex ephemeral_mutex_;
     std::condition_variable ephemeral_cv_;
     std::thread expiry_thread_;
     bool stop_expiry_thread_ = false;
 
-    void purgeExpiredEphemeralSecrets(Clock::time_point now);
-    void runExpiryWorker();
-    struct KeyValue
-    {
-        std::string key;
-        std::string value;
-    };
-
-    void recordAudit(std::string_view event, std::string_view actor, std::string_view target);
-    bool loadStore(std::vector<KeyValue> &entries, unsigned char master_key[32], bool &has_master_key);
-    bool saveStore(const std::vector<KeyValue> &entries, const unsigned char master_key[32]);
-    bool ensureBrokerKey(std::vector<KeyValue> &entries, unsigned char master_key[32]);
-
-    Vault &vault_;
 };
 
 #endif
