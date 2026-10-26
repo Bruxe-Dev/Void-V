@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include "../security/audit_log.hpp"
+#include "../security/auto_unseal.hpp"
 #include "../security/auth.hpp"
 #include "../security/encryption.hpp"
 #include "../security/secure_buffer.hpp"
@@ -53,6 +54,12 @@ public:
     bool unlock();
     void lock();
 
+    // Optional user-session auto-unseal. The master password is wrapped by a
+    // random fragment protected by the current OS user credential context.
+    bool enableAutoUnseal(std::string_view current_password);
+    bool disableAutoUnseal();
+    bool autoUnseal();
+
     bool saveData(std::string_view data);
     bool loadData(std::string& data);
 
@@ -82,6 +89,8 @@ public:
 private:
     void recordAudit(std::string_view event, std::string_view actor, std::string_view target);
     void touchActivity(std::uint64_t now_unix = 0) noexcept;
+    std::string autoUnsealFilePath() const;
+    void invalidateAutoUnseal();
 
     Authorizer& authorizer;
     Storage& storage;

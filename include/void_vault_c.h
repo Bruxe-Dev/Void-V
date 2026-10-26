@@ -45,6 +45,13 @@ VV_API int vv_unlock(VoidVaultHandle* handle, const char* password);
 // Immediately locks the vault and wipes the in-memory session password.
 VV_API void vv_lock(VoidVaultHandle* handle);
 
+// Enables/disables OS-user-protected auto-unseal. Enable requires an unlocked
+// vault and the current password; this is a local trust decision, not a
+// password substitute for remote or untrusted processes.
+VV_API int vv_enable_auto_unseal(VoidVaultHandle* handle, const char* current_password);
+VV_API int vv_disable_auto_unseal(VoidVaultHandle* handle);
+VV_API int vv_auto_unseal(VoidVaultHandle* handle);
+
 // Stores a named secret (requires unlocked vault). Returns 1 on success, 0 on failure.
 VV_API int vv_set_secret(VoidVaultHandle* handle, const char* key, const char* value);
 

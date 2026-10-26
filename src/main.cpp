@@ -289,7 +289,7 @@ namespace
         std::cout << "Void Vault v2.0.0 — Authenticated Encrypted Local Vault & Capability Broker\n"
                      "Usage: void_vault [--data-dir <directory>] [--kdf <interactive|moderate|sensitive>]\n"
                      "                  [--idle-timeout <seconds>] [--verify-audit]\n"
-                     "                  [--broker] [--version] [--help]\n"
+                     "                  [--auto-unseal] [--broker] [--version] [--help]\n"
                      "  Stores vault_auth.dat (password hash + failed-attempt counter),\n"
                      "  vault_data.dat (XChaCha20-Poly1305 AEAD encrypted record),\n"
                      "  vault_recovery.dat (optional Emergency Recovery Key capsule),\n"
@@ -454,6 +454,33 @@ namespace
             {
                 vault.lock();
                 std::cout << "OK locked\n" << std::flush;
+            }
+            else if (cmd == "ENABLE_AUTO_UNSEAL")
+            {
+                std::string pw_hex;
+                in >> pw_hex;
+                SecureBuffer password;
+                if (decodeHexToSecureBuffer(pw_hex, password) &&
+                    vault.enableAutoUnseal(password.view()))
+                {
+                    std::cout << "OK auto_unseal_enabled\n" << std::flush;
+                }
+                else
+                {
+                    std::cout << "ERR auto_unseal_enable_failed\n" << std::flush;
+                }
+                wipe(pw_hex);
+            }
+            else if (cmd == "DISABLE_AUTO_UNSEAL")
+            {
+                if (vault.disableAutoUnseal())
+                {
+                    std::cout << "OK auto_unseal_disabled\n" << std::flush;
+                }
+                else
+                {
+                    std::cout << "ERR auto_unseal_disable_failed\n" << std::flush;
+                }
             }
             else if (cmd == "SET_SECRET")
             {
@@ -728,6 +755,7 @@ int main(int argc, char **argv)
     std::filesystem::path data_dir = ".";
     KdfProfile kdf_profile = KdfProfile::Interactive;
     bool broker_mode = false;
+    bool auto_unseal_on_start = false;
     bool verify_audit_only = false;
     std::uint64_t idle_timeout_seconds = 0;
 
@@ -747,6 +775,11 @@ int main(int argc, char **argv)
         if (arg == "--broker")
         {
             broker_mode = true;
+            continue;
+        }
+        if (arg == "--auto-unseal")
+        {
+            auto_unseal_on_start = true;
             continue;
         }
         if (arg == "--verify-audit")
@@ -842,6 +875,12 @@ int main(int argc, char **argv)
     vault.setIdleTimeoutSeconds(idle_timeout_seconds);
 
     VaultBroker broker(vault);
+
+    if (auto_unseal_on_start && !vault.autoUnseal())
+    {
+        std::cerr << "OS-backed auto-unseal failed or is not configured for this user session.\n";
+        return 7;
+    }
 
     if (broker_mode)
     {

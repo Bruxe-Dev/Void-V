@@ -146,6 +146,33 @@ VV_API void vv_lock(VoidVaultHandle* handle)
     }
 }
 
+VV_API int vv_enable_auto_unseal(VoidVaultHandle* handle, const char* current_password)
+{
+    if (handle == nullptr || current_password == nullptr)
+    {
+        return 0;
+    }
+    return handle->vault.enableAutoUnseal(current_password) ? 1 : 0;
+}
+
+VV_API int vv_disable_auto_unseal(VoidVaultHandle* handle)
+{
+    if (handle == nullptr)
+    {
+        return 0;
+    }
+    return handle->vault.disableAutoUnseal() ? 1 : 0;
+}
+
+VV_API int vv_auto_unseal(VoidVaultHandle* handle)
+{
+    if (handle == nullptr)
+    {
+        return 0;
+    }
+    return handle->vault.autoUnseal() ? 1 : 0;
+}
+
 VV_API int vv_set_secret(VoidVaultHandle* handle, const char* key, const char* value)
 {
     if (handle == nullptr || key == nullptr || value == nullptr)

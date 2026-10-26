@@ -125,6 +125,7 @@ class VoidVaultNativeClient:
         data_dir: str | Path = ".",
         kdf_profile: str = "interactive",
         idle_timeout_seconds: int = 0,
+        auto_unseal: bool = False,
     ) -> None:
         self._dll_path = str(Path(dll_path).resolve())
         self._data_dir = Path(data_dir).resolve()
@@ -134,6 +135,7 @@ class VoidVaultNativeClient:
         self._audit_path = str(self._data_dir / "vault_audit.log")
         self._kdf = kdf_profile
         self._idle_timeout = idle_timeout_seconds
+        self._auto_unseal = auto_unseal
         self._lib = ctypes.CDLL(self._dll_path)
         self._bind_signatures()
         self._handle: Optional[ctypes.c_void_p] = None
@@ -160,6 +162,15 @@ class VoidVaultNativeClient:
 
         L.vv_lock.argtypes = [ctypes.c_void_p]
         L.vv_lock.restype = None
+
+        L.vv_enable_auto_unseal.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        L.vv_enable_auto_unseal.restype = ctypes.c_int
+
+        L.vv_disable_auto_unseal.argtypes = [ctypes.c_void_p]
+        L.vv_disable_auto_unseal.restype = ctypes.c_int
+
+        L.vv_auto_unseal.argtypes = [ctypes.c_void_p]
+        L.vv_auto_unseal.restype = ctypes.c_int
 
         L.vv_set_secret.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
         L.vv_set_secret.restype = ctypes.c_int
@@ -292,6 +303,12 @@ class VoidVaultNativeClient:
                 f"Failed to open Void Vault in '{self._data_dir}'"
             )
         self._handle = ctypes.c_void_p(h)
+        if self._auto_unseal:
+            try:
+                self.auto_unseal()
+            except Exception:
+                self.close()
+                raise
         return self
 
     def close(self) -> None:
@@ -321,6 +338,23 @@ class VoidVaultNativeClient:
     def lock(self) -> None:
         if self._handle is not None:
             self._lib.vv_lock(self._handle)
+
+    def enable_auto_unseal(self, current_password: str) -> None:
+        rc = self._lib.vv_enable_auto_unseal(
+            self._require_handle(), current_password.encode("utf-8")
+        )
+        if rc != 1:
+            raise VoidVaultError("auto_unseal_enable_failed")
+
+    def disable_auto_unseal(self) -> None:
+        rc = self._lib.vv_disable_auto_unseal(self._require_handle())
+        if rc != 1:
+            raise VoidVaultError("auto_unseal_disable_failed")
+
+    def auto_unseal(self) -> None:
+        rc = self._lib.vv_auto_unseal(self._require_handle())
+        if rc != 1:
+            raise VoidVaultError("auto_unseal_failed")
 
     def set_secret(self, key: str, value: str) -> None:
         rc = self._lib.vv_set_secret(
@@ -492,11 +526,13 @@ class VoidVaultClient:
         data_dir: str | Path = ".",
         kdf_profile: str = "interactive",
         idle_timeout_seconds: int = 0,
+        auto_unseal: bool = False,
     ) -> None:
         self._exe = str(Path(executable_path).resolve())
         self._data_dir = str(Path(data_dir).resolve())
         self._kdf = kdf_profile
         self._idle_timeout = int(idle_timeout_seconds)
+        self._auto_unseal = bool(auto_unseal)
         self._proc: Optional[subprocess.Popen[str]] = None
 
     def open(self) -> "VoidVaultClient":
@@ -511,6 +547,8 @@ class VoidVaultClient:
             self._kdf,
             "--broker",
         ]
+        if self._auto_unseal:
+            cmd.append("--auto-unseal")
         if self._idle_timeout > 0:
             cmd.extend(["--idle-timeout", str(self._idle_timeout)])
         self._proc = subprocess.Popen(
@@ -570,6 +608,13 @@ class VoidVaultClient:
 
     def lock(self) -> None:
         self._request("LOCK")
+
+    def enable_auto_unseal(self, current_password: str) -> None:
+        password_hex = current_password.encode("utf-8").hex()
+        self._request(f"ENABLE_AUTO_UNSEAL {password_hex}")
+
+    def disable_auto_unseal(self) -> None:
+        self._request("DISABLE_AUTO_UNSEAL")
 
     def set_secret(self, key: str, value: str) -> None:
         val_hex = value.encode("utf-8").hex()
@@ -769,6 +814,7 @@ class VaultApp:
         idle_timeout_seconds: int = 0,
         binary_path: Optional[str | Path] = None,
         prefer_native_dll: bool = True,
+        auto_unseal: bool = False,
     ) -> None:
         self.app_id = app_id
         self.scope = scope
@@ -778,6 +824,7 @@ class VaultApp:
         self.idle_timeout_seconds = idle_timeout_seconds
         self._explicit_binary = binary_path
         self._prefer_dll = prefer_native_dll
+        self.auto_unseal = auto_unseal
 
     def _resolve_user_dir(self, user_id: Optional[str]) -> Path:
         if not user_id:
@@ -800,12 +847,14 @@ class VaultApp:
                 data_dir=data_dir,
                 kdf_profile=self.kdf_profile,
                 idle_timeout_seconds=self.idle_timeout_seconds,
+                auto_unseal=self.auto_unseal,
             )
         return VoidVaultClient(
             executable_path=resolved_path,
             data_dir=data_dir,
             kdf_profile=self.kdf_profile,
             idle_timeout_seconds=self.idle_timeout_seconds,
+            auto_unseal=self.auto_unseal,
         )
 
     @contextmanager
@@ -827,11 +876,14 @@ class VaultApp:
         effective_scope = scope or self.scope
 
         with self._create_backend(data_dir) as backend:
-            if not auth_file.exists():
+            if self.auto_unseal:
+                backend.auto_unseal()
+            elif not auth_file.exists():
                 if not auto_setup:
                     raise VoidVaultError(f"Vault is not initialized in {data_dir}")
                 backend.setup_account(passphrase)
-            backend.unlock(passphrase)
+            if not self.auto_unseal:
+                backend.unlock(passphrase)
             try:
                 token = backend.issue_token(
                     self.app_id, scope=effective_scope, ttl_seconds=self.ttl_seconds

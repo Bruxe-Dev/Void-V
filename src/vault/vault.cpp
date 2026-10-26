@@ -3,10 +3,14 @@
 #include <sodium.h>
 #include <chrono>
 #include <filesystem>
+#include <string>
 #include <utility>
 
 namespace
 {
+    constexpr char AUTO_UNSEAL_MAGIC[] = "VVAUTO1";
+    constexpr std::size_t AUTO_UNSEAL_MAGIC_SIZE = sizeof(AUTO_UNSEAL_MAGIC) - 1;
+
     std::uint64_t currentUnixTime() noexcept
     {
         const auto now = std::chrono::system_clock::now();
@@ -112,6 +116,200 @@ VaultError Vault::lastError() const {
 
 std::string Vault::recoveryFilePath() const {
     return storage.path().empty() ? std::string() : storage.path() + ".recovery";
+}
+
+std::string Vault::autoUnsealFilePath() const {
+    return storage.path().empty() ? std::string() : storage.path() + ".autounseal";
+}
+
+bool Vault::enableAutoUnseal(std::string_view current_password) {
+    (void)checkIdleTimeout();
+    if (!is_unlocked || session_password.empty() ||
+        !session_password.constantTimeEquals(current_password) ||
+        storage.path().empty())
+    {
+        return false;
+    }
+
+    unsigned char fragment[crypto_aead_xchacha20poly1305_ietf_KEYBYTES]{};
+    unsigned char nonce[crypto_aead_xchacha20poly1305_ietf_NPUBBYTES]{};
+    randombytes_buf(fragment, sizeof(fragment));
+    randombytes_buf(nonce, sizeof(nonce));
+
+    const std::size_t cipher_size =
+        current_password.size() + crypto_aead_xchacha20poly1305_ietf_ABYTES;
+    std::string record(AUTO_UNSEAL_MAGIC, AUTO_UNSEAL_MAGIC_SIZE);
+    record.append(reinterpret_cast<const char*>(nonce), sizeof(nonce));
+    record.resize(AUTO_UNSEAL_MAGIC_SIZE + sizeof(nonce) + cipher_size, '\0');
+
+    unsigned long long written = 0;
+    const int encrypt_status = crypto_aead_xchacha20poly1305_ietf_encrypt(
+        reinterpret_cast<unsigned char*>(record.data() + AUTO_UNSEAL_MAGIC_SIZE + sizeof(nonce)),
+        &written,
+        reinterpret_cast<const unsigned char*>(current_password.data()),
+        static_cast<unsigned long long>(current_password.size()),
+        reinterpret_cast<const unsigned char*>(record.data()),
+        AUTO_UNSEAL_MAGIC_SIZE,
+        nullptr,
+        nonce,
+        fragment);
+
+    const std::string file_path = autoUnsealFilePath();
+    const bool record_saved =
+        encrypt_status == 0 &&
+        written == cipher_size &&
+        Storage::atomicWrite(file_path, record, true);
+    const bool fragment_saved =
+        record_saved &&
+        AutoUnsealStore::protectFragment(storage.path(), std::string_view(
+            reinterpret_cast<const char*>(fragment), sizeof(fragment)));
+
+    sodium_memzero(fragment, sizeof(fragment));
+    sodium_memzero(nonce, sizeof(nonce));
+    if (!record.empty())
+    {
+        sodium_memzero(record.data(), record.size());
+    }
+
+    if (!fragment_saved)
+    {
+        (void)AutoUnsealStore::removeFragment(storage.path());
+        std::error_code ec;
+        std::filesystem::remove(file_path, ec);
+        last_error = VaultError::StorageError;
+        return false;
+    }
+
+    recordAudit("AUTO_UNSEAL_ENABLED", "owner", "vault");
+    last_error = VaultError::None;
+    return true;
+}
+
+bool Vault::disableAutoUnseal() {
+    if (storage.path().empty())
+    {
+        return false;
+    }
+
+    const std::string file_path = autoUnsealFilePath();
+    bool file_removed = true;
+    if (Storage::isSymlinkOrReparsePoint(file_path))
+    {
+        file_removed = false;
+    }
+    else
+    {
+        std::error_code ec;
+        const bool exists = std::filesystem::exists(file_path, ec);
+        if (ec)
+        {
+            file_removed = false;
+        }
+        else if (exists)
+        {
+            file_removed = std::filesystem::remove(file_path, ec) && !ec;
+        }
+    }
+
+    const bool fragment_removed = AutoUnsealStore::removeFragment(storage.path());
+    if (!file_removed || !fragment_removed)
+    {
+        last_error = VaultError::StorageError;
+        return false;
+    }
+
+    recordAudit("AUTO_UNSEAL_DISABLED", "owner", "vault");
+    last_error = VaultError::None;
+    return true;
+}
+
+bool Vault::autoUnseal() {
+    if (storage.path().empty())
+    {
+        return false;
+    }
+
+    std::string record;
+    if (Storage::isSymlinkOrReparsePoint(autoUnsealFilePath()) ||
+        !Storage::readFile(autoUnsealFilePath(), record) ||
+        record.size() < AUTO_UNSEAL_MAGIC_SIZE +
+                            crypto_aead_xchacha20poly1305_ietf_NPUBBYTES +
+                            crypto_aead_xchacha20poly1305_ietf_ABYTES ||
+        record.compare(0, AUTO_UNSEAL_MAGIC_SIZE, AUTO_UNSEAL_MAGIC) != 0)
+    {
+        last_error = VaultError::StorageError;
+        return false;
+    }
+
+    std::string fragment;
+    if (!AutoUnsealStore::unprotectFragment(storage.path(), fragment) ||
+        fragment.size() != crypto_aead_xchacha20poly1305_ietf_KEYBYTES)
+    {
+        if (!fragment.empty())
+        {
+            sodium_memzero(fragment.data(), fragment.size());
+        }
+        sodium_memzero(record.data(), record.size());
+        last_error = VaultError::Locked;
+        return false;
+    }
+
+    const auto* nonce = reinterpret_cast<const unsigned char*>(
+        record.data() + AUTO_UNSEAL_MAGIC_SIZE);
+    const auto* ciphertext = reinterpret_cast<const unsigned char*>(
+        record.data() + AUTO_UNSEAL_MAGIC_SIZE +
+        crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
+    const std::size_t ciphertext_size =
+        record.size() - AUTO_UNSEAL_MAGIC_SIZE -
+        crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
+    std::string password(ciphertext_size -
+                             crypto_aead_xchacha20poly1305_ietf_ABYTES,
+                         '\0');
+    unsigned long long password_size = 0;
+    const int decrypt_status = crypto_aead_xchacha20poly1305_ietf_decrypt(
+        reinterpret_cast<unsigned char*>(password.data()),
+        &password_size,
+        nullptr,
+        ciphertext,
+        static_cast<unsigned long long>(ciphertext_size),
+        reinterpret_cast<const unsigned char*>(record.data()),
+        AUTO_UNSEAL_MAGIC_SIZE,
+        nonce,
+        reinterpret_cast<const unsigned char*>(fragment.data()));
+
+    sodium_memzero(fragment.data(), fragment.size());
+    sodium_memzero(record.data(), record.size());
+    const bool decrypted = decrypt_status == 0 && password_size == password.size();
+    const bool unlocked = decrypted && authenticate(password) && unlock();
+    if (!password.empty())
+    {
+        sodium_memzero(password.data(), password.size());
+    }
+
+    if (!unlocked)
+    {
+        last_error = VaultError::Locked;
+        recordAudit("AUTO_UNSEAL_FAILED", "system", "vault");
+        return false;
+    }
+
+    recordAudit("AUTO_UNSEAL_SUCCEEDED", "system", "vault");
+    return true;
+}
+
+void Vault::invalidateAutoUnseal() {
+    const std::string path = autoUnsealFilePath();
+    if (path.empty())
+    {
+        return;
+    }
+
+    std::error_code ec;
+    if (!Storage::isSymlinkOrReparsePoint(path))
+    {
+        std::filesystem::remove(path, ec);
+    }
+    (void)AutoUnsealStore::removeFragment(storage.path());
 }
 
 bool Vault::hasRecoveryKey() const {
@@ -327,6 +525,7 @@ bool Vault::changePassword(std::string_view current_password, std::string_view n
         std::filesystem::remove(std::filesystem::path(recoveryFilePath()), ec);
     }
 
+    invalidateAutoUnseal();
     session_password.assign(new_password);
     is_unlocked = true;
     touchActivity();
@@ -445,6 +644,7 @@ bool Vault::recoverWithEmergencyKey(std::string_view recovery_key, std::string_v
     std::error_code ec;
     std::filesystem::remove(std::filesystem::path(rpath), ec);
 
+    invalidateAutoUnseal();
     session_password.assign(new_password);
     is_unlocked = true;
     touchActivity();

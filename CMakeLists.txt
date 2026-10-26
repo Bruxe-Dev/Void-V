@@ -131,6 +131,7 @@ add_library(void_vault_core STATIC
     src/vault/broker.cpp
     src/vault/void_vault_c.cpp
     src/security/audit_log.cpp
+    src/security/auto_unseal.cpp
     src/security/auth.cpp
     src/security/encryption.cpp
     src/storage/storage.cpp
@@ -157,6 +158,7 @@ add_library(void_vault_shared SHARED
     src/vault/broker.cpp
     src/vault/void_vault_c.cpp
     src/security/audit_log.cpp
+    src/security/auto_unseal.cpp
     src/security/auth.cpp
     src/security/encryption.cpp
     src/storage/storage.cpp
@@ -180,6 +182,11 @@ set_target_properties(void_vault_shared PROPERTIES
     OUTPUT_NAME "void_vault"
     PREFIX ""
 )
+
+if(WIN32)
+    target_link_libraries(void_vault_core PUBLIC Crypt32)
+    target_link_libraries(void_vault_shared PRIVATE Crypt32)
+endif()
 
 add_executable(void_vault src/main.cpp)
 target_link_libraries(void_vault PRIVATE void_vault_core)

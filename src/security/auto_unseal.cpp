@@ -3,7 +3,9 @@
 #include <sodium.h>
 
 #include <array>
+#include <filesystem>
 #include <string>
+#include <system_error>
 
 #include "../../include/storage.hpp"
 
@@ -13,7 +15,7 @@
 #endif
 #include <windows.h>
 #include <wincrypt.h>
-#else
+#elif defined(__linux__)
 #include <cerrno>
 #include <linux/keyctl.h>
 #include <sys/syscall.h>
@@ -97,7 +99,6 @@ bool AutoUnsealStore::protectFragment(
     }
 
 #ifdef _WIN32
-    const std::wstring path = std::filesystem::path(vault_path + ".oskey").wstring();
     if (Storage::isSymlinkOrReparsePoint(vault_path + ".oskey"))
     {
         return false;
