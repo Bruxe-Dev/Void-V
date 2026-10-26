@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <memory>
 #include <sstream>
 
 namespace
@@ -233,6 +234,7 @@ bool VaultBroker::supportsOperation(std::string_view operation) const noexcept
            operation == "SET_EPHEMERAL_SECRET" ||
            operation == "GET_EPHEMERAL_SECRET" ||
            operation == "DELETE_EPHEMERAL_SECRET" ||
+           operation == "DERIVE_EPHEMERAL_KEY" ||
            operation == "ISSUE_TOKEN" ||
            operation == "VERIFY_TOKEN" ||
            operation == "TOKEN_GET_SECRET" ||
@@ -1099,6 +1101,7 @@ void VaultBroker::purgeExpiredEphemeralSecrets(Clock::time_point now)
         if (it->second.expires_at <= now)
         {
             it->second.value.clear();
+            it->second.key_seed.clear();
             it = ephemeral_secrets_.erase(it);
         }
         else
@@ -1114,6 +1117,7 @@ void VaultBroker::clearEphemeralSecrets()
     for (auto &entry : ephemeral_secrets_)
     {
         entry.second.value.clear();
+        entry.second.key_seed.clear();
     }
     ephemeral_secrets_.clear();
 }
@@ -1155,6 +1159,17 @@ bool VaultBroker::setEphemeralSecret(
 
     EphemeralSecret entry;
     entry.value.assign(value);
+    std::unique_ptr<unsigned char, decltype(&sodium_free)> key_seed(
+        static_cast<unsigned char*>(sodium_malloc(crypto_kdf_KEYBYTES)),
+        sodium_free);
+    if (!key_seed)
+    {
+        return false;
+    }
+    randombytes_buf(key_seed.get(), crypto_kdf_KEYBYTES);
+    entry.key_seed.assign(std::string_view(
+        reinterpret_cast<const char*>(key_seed.get()),
+        crypto_kdf_KEYBYTES));
     entry.expires_at = Clock::now() +
                        std::chrono::seconds(
                            static_cast<std::chrono::seconds::rep>(ttl_seconds));
@@ -1226,6 +1241,7 @@ bool VaultBroker::deleteEphemeralSecret(std::string_view key)
         if (it != ephemeral_secrets_.end())
         {
             it->second.value.clear();
+            it->second.key_seed.clear();
             ephemeral_secrets_.erase(it);
             removed = true;
         }
@@ -1236,6 +1252,53 @@ bool VaultBroker::deleteEphemeralSecret(std::string_view key)
         recordAudit("EPHEMERAL_SECRET_DELETED", "owner", key);
     }
     return removed;
+}
+
+bool VaultBroker::deriveEphemeralKey(
+    std::string_view key,
+    std::uint64_t subkey_id,
+    std::string& out_key_hex)
+{
+    if (!isValidKeyName(key))
+    {
+        return false;
+    }
+
+    (void)vault_.checkIdleTimeout();
+    if (!vault_.isUnlocked())
+    {
+        return false;
+    }
+
+    unsigned char derived_key[crypto_kdf_KEYBYTES]{};
+    {
+        std::lock_guard<std::mutex> lock(ephemeral_mutex_);
+        purgeExpiredEphemeralSecrets(Clock::now());
+
+        const auto it = ephemeral_secrets_.find(std::string(key));
+        if (it == ephemeral_secrets_.end() ||
+            it->second.key_seed.size() != crypto_kdf_KEYBYTES)
+        {
+            return false;
+        }
+
+        if (crypto_kdf_derive_from_key(
+                derived_key,
+                sizeof(derived_key),
+                subkey_id,
+                "VVEPMKEY",
+                reinterpret_cast<const unsigned char*>(
+                    it->second.key_seed.view().data())) != 0)
+        {
+            sodium_memzero(derived_key, sizeof(derived_key));
+            return false;
+        }
+    }
+
+    out_key_hex = toHex(derived_key, sizeof(derived_key));
+    sodium_memzero(derived_key, sizeof(derived_key));
+    recordAudit("EPHEMERAL_KEY_DERIVED", "owner", key);
+    return true;
 }
 
 bool VaultBroker::transitEncrypt(

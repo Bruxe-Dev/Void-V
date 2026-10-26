@@ -35,8 +35,9 @@ namespace
         {
             return false;
         }
-        for (const unsigned char c : common_name)
+        for (const char character : common_name)
         {
+            const auto c = static_cast<unsigned char>(character);
             if (c < 0x20U || c == 0x7FU)
             {
                 return false;

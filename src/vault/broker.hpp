@@ -73,6 +73,10 @@ public:
 
     bool getEphemeralSecret(std::string_view key, std::string &out_value);
     bool deleteEphemeralSecret(std::string_view key);
+    bool deriveEphemeralKey(
+        std::string_view key,
+        std::uint64_t subkey_id,
+        std::string& out_key_hex);
 
     bool transitEncrypt(
         std::string_view token,
@@ -173,6 +177,7 @@ private:
 
     struct EphemeralSecret {
         SecureBuffer value;
+        SecureBuffer key_seed;
         Clock::time_point expires_at;
     };
 

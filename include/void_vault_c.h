@@ -128,6 +128,14 @@ VV_API int vv_get_ephemeral_secret(
     char* out_buf,
     size_t out_buf_size);
 VV_API int vv_delete_ephemeral_secret(VoidVaultHandle* handle, const char* key);
+// Derives a 32-byte ephemeral subkey from an in-memory TTL entry. The result
+// is returned as 64 lowercase hex characters and is not revocable after export.
+VV_API int vv_derive_ephemeral_key(
+    VoidVaultHandle* handle,
+    const char* key,
+    uint64_t subkey_id,
+    char* out_hex_buf,
+    size_t out_hex_buf_size);
 
 // Writes comma-separated stored key names into `out_csv_buf`. Returns 1 on success.
 VV_API int vv_list_keys(

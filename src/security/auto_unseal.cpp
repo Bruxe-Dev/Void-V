@@ -53,6 +53,7 @@ namespace
         return normalized;
     }
 
+#ifdef __linux__
     std::string keyDescription(const std::string& normalized_vault_path)
     {
         std::array<unsigned char, crypto_generichash_BYTES> digest{};
@@ -72,7 +73,6 @@ namespace
         return std::string(KEY_DESCRIPTION_PREFIX) + hex.data();
     }
 
-#ifdef __linux__
     long addKey(
         const char* type,
         const char* description,
@@ -128,7 +128,7 @@ bool AutoUnsealStore::protectFragment(
     }
 
 #ifdef _WIN32
-    if (Storage::isSymlinkOrReparsePoint(vault_path + ".oskey"))
+    if (Storage::isSymlinkOrReparsePoint(normalized_path + ".oskey"))
     {
         return false;
     }
@@ -292,6 +292,10 @@ bool AutoUnsealStore::removeFragment(const std::string& vault_path)
     }
     return std::filesystem::remove(path, ec) && !ec;
 #elif defined(__linux__)
+    if (sodium_init() < 0)
+    {
+        return false;
+    }
     const std::string description = keyDescription(normalized_path);
     const long serial = searchKey(description.c_str());
     if (serial < 0)

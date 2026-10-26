@@ -15,7 +15,8 @@ Set-Location (Split-Path $PSScriptRoot -Parent)
 if (-not (Test-Path "$Msys2Bin\g++.exe")) { throw "g++ not found in $Msys2Bin" }
 $env:PATH = "$Msys2Bin;" + $env:PATH
 
-cmake -S . -B $BuildDir -G "MinGW Makefiles" "-DCMAKE_BUILD_TYPE=$BuildType"
+$OpenSslRoot = Split-Path $Msys2Bin -Parent
+cmake -S . -B $BuildDir -G "MinGW Makefiles" "-DCMAKE_BUILD_TYPE=$BuildType" "-DOPENSSL_ROOT_DIR=$OpenSslRoot"
 if ($LASTEXITCODE -ne 0) { throw "configure failed" }
 cmake --build $BuildDir -j 4
 if ($LASTEXITCODE -ne 0) { throw "build failed" }

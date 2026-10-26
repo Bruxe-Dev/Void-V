@@ -235,8 +235,12 @@ or keys it receives back through other APIs.
 The broker can create self-signed Ed25519 certificate authorities and issue
 leaf certificates. The CA private key bundle is stored in encrypted `VVKV1`
 storage, not returned by the API. The CA validity is fixed at 10 years, and
-leaf certificate validity is limited to 825 days. The C++ operation engine and
-Python `VoidVaultClient` expose the PKI operations; the current C ABI exports
+leaf certificate validity is limited to 825 days. The current API puts the
+requested common name in the subject but does not accept Subject Alternative
+Names; these certificates are not sufficient for typical public TLS clients.
+Add SAN support and a certificate-chain validation workflow before using this
+engine for general-purpose TLS or production identity issuance. The C++
+operation engine and Python `VoidVaultClient` expose PKI operations; the C ABI exports
 daemon Transit operations but does not yet expose PKI calls.
 
 ### OS-backed auto-unseal
@@ -249,7 +253,9 @@ attempt an unlock at startup. The Windows implementation uses current-user
 DPAPI; Linux uses the current user's kernel keyring. Other operating systems
 currently report that auto-unseal is unavailable.
 
-This feature is a convenience, not a defense against malware, an administrator,
+These implementations protect secrets using OS user-account facilities; they
+do not use a TPM, secure enclave, or other hardware-isolated key store. This
+feature is a convenience, not a defense against malware, an administrator,
 or another process running as the same OS user: that user context can generally
 access the protected fragment and the vault files. Keep the vault directory
 private, and do not enable auto-unseal for a shared or remotely accessible

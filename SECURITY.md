@@ -42,6 +42,7 @@ Void Vault uses established primitives from **libsodium** with zero custom crypt
    - PKI CA private-key bundles are persisted only inside the encrypted vault store. The broker returns certificates, not private CA bundles.
 6. **OS-Backed Auto-Unseal**
    - Opt-in auto-unseal encrypts the master password under a random fragment. Windows protects the fragment with current-user DPAPI; Linux stores it in the current user's kernel keyring. The encrypted envelope is stored beside the vault data file.
+   - These integrations use OS user-account facilities, not a TPM, secure enclave, or other hardware-isolated key store.
    - This is not protection against malware, administrators, or another process running as the same OS user. Anyone able to execute as that user may be able to use the OS credential context and access the vault files. Auto-unseal is unsuitable for shared accounts or remotely accessible services.
 
 ---

@@ -33,7 +33,7 @@ It provides defense-in-depth local secret protection with **Argon2id (v1.3)** ke
   - Creates Ed25519 authorities and issues leaf certificates; private CA material remains in encrypted vault storage.
 - **Opt-In OS-Backed Auto-Unseal**
   - Protects a local unseal fragment using current-user Windows DPAPI or the Linux user keyring, enabling a trusted local broker to attempt unlock at startup.
-  - This is a local convenience and does not protect against another process running as the same OS user.
+  - This uses OS account facilities, not hardware isolation, and does not protect against another process running as the same OS user.
 - **XChaCha20-Poly1305 IETF Authenticated Encryption (`VV02` / `VV2M` / `VV2S`)**
   - Derives a 256-bit key from the user's passphrase and a fresh 128-bit random salt per save using `crypto_pwhash` (`Argon2id v1.3`).
   - Encrypts with a fresh 192-bit (24-byte) random nonce and authenticates the entire 44-byte header (`magic || salt || nonce`) as Additional Authenticated Data (AAD).

@@ -33,7 +33,7 @@ jobs:
       - name: Build, Test, and Package
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DVOID_VAULT_STATIC_RUNTIME=ON
+          cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DVOID_VAULT_STATIC_RUNTIME=ON -DOPENSSL_ROOT_DIR="$MINGW_PREFIX"
           cmake --build build -j 4
           ctest --test-dir build --output-on-failure
           mkdir -p "dist/void-vault-${GITHUB_REF_NAME}-windows-x64/include"

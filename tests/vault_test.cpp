@@ -89,6 +89,32 @@ int main()
         check(vault.loadData(loaded) && loaded == original, "Data persists across restart");
     }
 
+#ifdef _WIN32
+    {
+        const std::string auto_data_file = dir.file("auto_unseal_data.dat");
+        const std::string auto_auth_file = dir.file("auto_unseal_auth.dat");
+        const std::string auto_password = "AutoUnsealTestPassword123!";
+        Authorizer authorizer(auto_auth_file);
+        Storage storage(auto_data_file);
+        Vault vault(authorizer, storage);
+        check(authorizer.setPassword(auto_password), "Auto-unseal account setup");
+        check(vault.authenticate(auto_password) && vault.unlock(),
+              "Unlock before enabling auto-unseal");
+        check(vault.enableAutoUnseal(auto_password), "Enable OS-backed auto-unseal");
+        vault.lock();
+    }
+    {
+        const std::string auto_data_file = dir.file("auto_unseal_data.dat");
+        const std::string auto_auth_file = dir.file("auto_unseal_auth.dat");
+        Authorizer authorizer(auto_auth_file);
+        Storage storage(auto_data_file);
+        Vault vault(authorizer, storage);
+        check(vault.autoUnseal() && vault.isUnlocked(),
+              "OS-backed auto-unseal restores the vault in a fresh Vault instance");
+        check(vault.disableAutoUnseal(), "Disable OS-backed auto-unseal");
+    }
+#endif
+
     // Foreign data: another account with a different password must not overwrite.
     {
         const std::string other_auth = dir.file("other_auth.dat");

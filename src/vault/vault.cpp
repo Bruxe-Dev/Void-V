@@ -126,7 +126,8 @@ bool Vault::enableAutoUnseal(std::string_view current_password) {
     (void)checkIdleTimeout();
     if (!is_unlocked || session_password.empty() ||
         !session_password.constantTimeEquals(current_password) ||
-        storage.path().empty())
+        storage.path().empty() ||
+        current_password.size() > SecureBuffer::MAX_CAPACITY)
     {
         return false;
     }
@@ -235,6 +236,10 @@ bool Vault::autoUnseal() {
         record.size() < AUTO_UNSEAL_MAGIC_SIZE +
                             crypto_aead_xchacha20poly1305_ietf_NPUBBYTES +
                             crypto_aead_xchacha20poly1305_ietf_ABYTES ||
+        record.size() > AUTO_UNSEAL_MAGIC_SIZE +
+                            crypto_aead_xchacha20poly1305_ietf_NPUBBYTES +
+                            SecureBuffer::MAX_CAPACITY +
+                            crypto_aead_xchacha20poly1305_ietf_ABYTES ||
         record.compare(0, AUTO_UNSEAL_MAGIC_SIZE, AUTO_UNSEAL_MAGIC) != 0)
     {
         last_error = VaultError::StorageError;
@@ -262,12 +267,26 @@ bool Vault::autoUnseal() {
     const std::size_t ciphertext_size =
         record.size() - AUTO_UNSEAL_MAGIC_SIZE -
         crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
-    std::string password(ciphertext_size -
-                             crypto_aead_xchacha20poly1305_ietf_ABYTES,
-                         '\0');
+    const std::size_t password_capacity =
+        ciphertext_size - crypto_aead_xchacha20poly1305_ietf_ABYTES;
+    if (password_capacity == 0)
+    {
+        sodium_memzero(fragment.data(), fragment.size());
+        sodium_memzero(record.data(), record.size());
+        last_error = VaultError::StorageError;
+        return false;
+    }
+    auto* password = static_cast<unsigned char*>(sodium_malloc(password_capacity));
+    if (password == nullptr)
+    {
+        sodium_memzero(fragment.data(), fragment.size());
+        sodium_memzero(record.data(), record.size());
+        last_error = VaultError::StorageError;
+        return false;
+    }
     unsigned long long password_size = 0;
     const int decrypt_status = crypto_aead_xchacha20poly1305_ietf_decrypt(
-        reinterpret_cast<unsigned char*>(password.data()),
+        password,
         &password_size,
         nullptr,
         ciphertext,
@@ -279,12 +298,14 @@ bool Vault::autoUnseal() {
 
     sodium_memzero(fragment.data(), fragment.size());
     sodium_memzero(record.data(), record.size());
-    const bool decrypted = decrypt_status == 0 && password_size == password.size();
-    const bool unlocked = decrypted && authenticate(password) && unlock();
-    if (!password.empty())
-    {
-        sodium_memzero(password.data(), password.size());
-    }
+    const bool decrypted =
+        decrypt_status == 0 && password_size == password_capacity;
+    const std::string_view password_view(
+        reinterpret_cast<const char*>(password),
+        decrypted ? static_cast<std::size_t>(password_size) : 0);
+    const bool unlocked =
+        decrypted && authenticate(password_view) && unlock();
+    sodium_free(password);
 
     if (!unlocked)
     {
