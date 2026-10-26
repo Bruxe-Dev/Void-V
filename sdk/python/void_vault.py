@@ -205,6 +205,15 @@ class VoidVaultNativeClient:
         L.vv_delete_ephemeral_secret.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
         L.vv_delete_ephemeral_secret.restype = ctypes.c_int
 
+        L.vv_derive_ephemeral_key.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_uint64,
+            ctypes.c_char_p,
+            ctypes.c_size_t,
+        ]
+        L.vv_derive_ephemeral_key.restype = ctypes.c_int
+
         L.vv_list_keys.argtypes = [
             ctypes.c_void_p,
             ctypes.c_char_p,
@@ -402,6 +411,19 @@ class VoidVaultNativeClient:
         )
         if rc != 1:
             raise VoidVaultError("delete_ephemeral_secret_failed")
+
+    def derive_ephemeral_key(self, key: str, subkey_id: int = 1) -> bytes:
+        buf = ctypes.create_string_buffer(65)
+        rc = self._lib.vv_derive_ephemeral_key(
+            self._require_handle(),
+            key.encode("utf-8"),
+            ctypes.c_uint64(int(subkey_id)),
+            buf,
+            ctypes.sizeof(buf),
+        )
+        if rc != 1:
+            raise VoidVaultError("derive_ephemeral_key_failed")
+        return bytes.fromhex(buf.value.decode("ascii"))
 
     def list_keys(self) -> List[str]:
         buf = ctypes.create_string_buffer(65536)
@@ -637,6 +659,12 @@ class VoidVaultClient:
 
     def delete_ephemeral_secret(self, key: str) -> None:
         self._request(f"DELETE_EPHEMERAL_SECRET {key}")
+
+    def derive_ephemeral_key(self, key: str, subkey_id: int = 1) -> bytes:
+        key_hex = self._request(
+            f"DERIVE_EPHEMERAL_KEY {key} {int(subkey_id)}"
+        )
+        return bytes.fromhex(key_hex)
 
     def list_keys(self) -> List[str]:
         raw = self._request("LIST_KEYS").strip()

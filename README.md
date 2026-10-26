@@ -22,7 +22,8 @@ It provides defense-in-depth local secret protection with **Argon2id (v1.3)** ke
   - Revoke tokens for a single compromised application (`revokeAppTokens(app_id)`) without disrupting other applications, or revoke all tokens globally (`revokeAllTokens()`).
   - Configurable inactivity auto-lock (`--idle-timeout <seconds>`).
 - **In-Memory Ephemeral Secrets**
-  - Store separate TTL-bound values in broker memory without writing them to `VVKV1`; reads reject expired values and a cleanup worker wipes expired entries.
+  - Store separate TTL-bound values and KDF seeds in broker memory without writing them to `VVKV1`; expired entries are rejected and wiped by a cleanup worker.
+  - Derive repeatable per-entry subkeys with `crypto_kdf_derive_from_key`; the seed is removed with its source entry when the TTL expires.
   - Ephemeral values disappear when the broker exits. Callers that read a value receive their own copy, which the broker cannot erase.
 - **Modular Broker Engines**
   - A shared operation-engine interface routes key-value, Transit, and PKI operations to separate implementations.

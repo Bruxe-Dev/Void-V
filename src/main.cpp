@@ -568,6 +568,21 @@ namespace
                     std::cout << "ERR get_ephemeral_secret_failed\n" << std::flush;
                 }
             }
+            else if (cmd == "DERIVE_EPHEMERAL_KEY")
+            {
+                std::string key, key_hex;
+                std::uint64_t subkey_id = 1;
+                in >> key >> subkey_id;
+                if (broker.deriveEphemeralKey(key, subkey_id, key_hex))
+                {
+                    std::cout << "OK " << key_hex << '\n' << std::flush;
+                    wipe(key_hex);
+                }
+                else
+                {
+                    std::cout << "ERR derive_ephemeral_key_failed\n" << std::flush;
+                }
+            }
             else if (cmd == "DELETE_EPHEMERAL_SECRET")
             {
                 std::string key;

@@ -899,6 +899,30 @@ VV_API int vv_delete_ephemeral_secret(VoidVaultHandle* handle, const char* key)
     return handle->broker.deleteEphemeralSecret(key) ? 1 : 0;
 }
 
+VV_API int vv_derive_ephemeral_key(
+    VoidVaultHandle* handle,
+    const char* key,
+    uint64_t subkey_id,
+    char* out_hex_buf,
+    size_t out_hex_buf_size)
+{
+    if (handle == nullptr || key == nullptr)
+    {
+        return 0;
+    }
+    std::string key_hex;
+    if (!handle->broker.deriveEphemeralKey(key, subkey_id, key_hex))
+    {
+        return 0;
+    }
+    const int copied = copyOutString(key_hex, out_hex_buf, out_hex_buf_size);
+    if (!key_hex.empty())
+    {
+        sodium_memzero(key_hex.data(), key_hex.size());
+    }
+    return copied;
+}
+
 VV_API int vv_list_keys(
     VoidVaultHandle* handle,
     char* out_csv_buf,

@@ -55,6 +55,21 @@ int main()
               "Save in-memory ephemeral secret");
         check(broker.getEphemeralSecret("session.temporary", val) && val == "short-lived",
               "Read ephemeral secret before expiry");
+        std::string ephemeral_key;
+        std::string ephemeral_key_repeat;
+        std::string ephemeral_subkey;
+        check(broker.deriveEphemeralKey(
+                  "session.temporary", 1, ephemeral_key) &&
+                  ephemeral_key.size() == 64,
+              "Derive an ephemeral subkey from the in-memory seed");
+        check(broker.deriveEphemeralKey(
+                  "session.temporary", 1, ephemeral_key_repeat) &&
+                  ephemeral_key == ephemeral_key_repeat,
+              "Ephemeral subkey derivation is stable during its TTL");
+        check(broker.deriveEphemeralKey(
+                  "session.temporary", 2, ephemeral_subkey) &&
+                  ephemeral_subkey != ephemeral_key,
+              "Distinct subkey identifiers derive distinct ephemeral keys");
         check(!broker.setEphemeralSecret("session.zero_ttl", "invalid", 0),
               "Reject zero ephemeral TTL");
         check(!broker.setEphemeralSecret(
@@ -65,6 +80,9 @@ int main()
         std::this_thread::sleep_for(std::chrono::milliseconds(1100));
         check(!broker.getEphemeralSecret("session.temporary", val),
               "Reject ephemeral secret after expiry");
+        check(!broker.deriveEphemeralKey(
+                  "session.temporary", 1, ephemeral_key),
+              "Reject ephemeral subkey derivation after its source expires");
 
         check(broker.setEphemeralSecret("session.delete", "remove-me", 30),
               "Save another ephemeral secret");
@@ -273,11 +291,21 @@ int main()
                   h, "app.temporary", ephemeral_buf, sizeof(ephemeral_buf)) == 1 &&
                   std::strcmp(ephemeral_buf, "short-lived") == 0,
               "C ABI reads an ephemeral secret");
+        char ephemeral_key_hex[65]{};
+        check(vv_derive_ephemeral_key(
+                  h, "app.temporary", 7,
+                  ephemeral_key_hex, sizeof(ephemeral_key_hex)) == 1 &&
+                  std::strlen(ephemeral_key_hex) == 64,
+              "C ABI derives an ephemeral subkey");
         check(vv_delete_ephemeral_secret(h, "app.temporary") == 1,
               "C ABI deletes an ephemeral secret");
         check(vv_get_ephemeral_secret(
                   h, "app.temporary", ephemeral_buf, sizeof(ephemeral_buf)) == 0,
               "C ABI cannot read a deleted ephemeral secret");
+        check(vv_derive_ephemeral_key(
+                  h, "app.temporary", 7,
+                  ephemeral_key_hex, sizeof(ephemeral_key_hex)) == 0,
+              "C ABI cannot derive from a deleted ephemeral seed");
 
         char token_buf[512]{};
         check(vv_issue_token(h, "c-client", "read:app.*", 300, token_buf, sizeof(token_buf)) == 1,

@@ -174,6 +174,7 @@ All secret values and passwords on the wire are **lowercase hex-encoded** so bin
 | `SET_EPHEMERAL_SECRET <key> <ttl_sec> <value_hex>` | `OK saved` | Stores a value in broker memory only; maximum TTL is 24 hours |
 | `GET_EPHEMERAL_SECRET <key>` | `OK <value_hex>` | Reads the value only while the vault is unlocked and before its TTL expires |
 | `DELETE_EPHEMERAL_SECRET <key>` | `OK deleted` | Wipes and removes an in-memory-only value |
+| `DERIVE_EPHEMERAL_KEY <key> <subkey_id>` | `OK <64_char_hex_key>` | Derives a subkey from a per-entry random KDF seed while the entry remains live |
 | `TRANSIT_ENCRYPT <token> <app_id> <key_id> <plaintext_hex>` | `OK <ciphertext_hex>` | Encrypts bytes inside the broker; token scope must allow `transit:encrypt` |
 | `TRANSIT_DECRYPT <token> <app_id> <key_id> <ciphertext_hex>` | `OK <plaintext_hex>` | Decrypts bytes inside the broker; token scope must allow `transit:decrypt` |
 | `PKI_CREATE_CA <authority_id> <common_name_hex>` | `OK <certificate_hex>` | Creates a self-signed Ed25519 CA; private material is kept in encrypted vault storage |
@@ -195,6 +196,10 @@ Ephemeral values are not included in `VVKV1`, are wiped when the vault locks or 
 broker process exits, and are purged after expiry. A read rejects an expired value
 even if the background cleanup has not run yet. A value returned to a caller is
 copied into caller memory; the broker cannot wipe that copy later.
+Each entry also has an independently generated 32-byte KDF seed in protected
+memory. `DERIVE_EPHEMERAL_KEY` derives a stable 32-byte subkey for a chosen
+subkey ID from that seed; the seed expires with the value. Exported subkeys are
+copies and cannot be revoked or erased from caller memory after expiry.
 
 ---
 
@@ -293,6 +298,11 @@ int main(void) {
     return 0;
 }
 ```
+
+The embedded C ABI also exposes `vv_derive_ephemeral_key`, which returns the
+64-character hex form of an ephemeral 32-byte subkey. Its seed stays in broker
+memory until the source entry expires, but a caller can retain the exported
+key independently.
 
 ---
 
