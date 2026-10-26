@@ -182,6 +182,46 @@ VV_API int vv_delete_secret(VoidVaultHandle* handle, const char* key)
     return handle->broker.deleteSecret(key) ? 1 : 0;
 }
 
+VV_API int vv_set_ephemeral_secret(
+    VoidVaultHandle* handle,
+    const char* key,
+    const char* value,
+    uint64_t ttl_seconds)
+{
+    if (handle == nullptr || key == nullptr || value == nullptr)
+    {
+        return 0;
+    }
+    return handle->broker.setEphemeralSecret(key, value, ttl_seconds) ? 1 : 0;
+}
+
+VV_API int vv_get_ephemeral_secret(
+    VoidVaultHandle* handle,
+    const char* key,
+    char* out_buf,
+    size_t out_buf_size)
+{
+    if (handle == nullptr || key == nullptr)
+    {
+        return 0;
+    }
+    std::string val;
+    if (!handle->broker.getEphemeralSecret(key, val))
+    {
+        return 0;
+    }
+    return copyOutString(val, out_buf, out_buf_size);
+}
+
+VV_API int vv_delete_ephemeral_secret(VoidVaultHandle* handle, const char* key)
+{
+    if (handle == nullptr || key == nullptr)
+    {
+        return 0;
+    }
+    return handle->broker.deleteEphemeralSecret(key) ? 1 : 0;
+}
+
 VV_API int vv_list_keys(
     VoidVaultHandle* handle,
     char* out_csv_buf,

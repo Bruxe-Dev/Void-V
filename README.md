@@ -21,6 +21,9 @@ It provides defense-in-depth local secret protection with **Argon2id (v1.3)** ke
   - Issue scoped `HMAC-SHA512256` tokens (`VVTOK1`) bound to a specific `app_id`, `scope`, and TTL.
   - Revoke tokens for a single compromised application (`revokeAppTokens(app_id)`) without disrupting other applications, or revoke all tokens globally (`revokeAllTokens()`).
   - Configurable inactivity auto-lock (`--idle-timeout <seconds>`).
+- **In-Memory Ephemeral Secrets**
+  - Store separate TTL-bound values in broker memory without writing them to `VVKV1`; reads reject expired values and a cleanup worker wipes expired entries.
+  - Ephemeral values disappear when the broker exits. Callers that read a value receive their own copy, which the broker cannot erase.
 - **XChaCha20-Poly1305 IETF Authenticated Encryption (`VV02` / `VV2M` / `VV2S`)**
   - Derives a 256-bit key from the user's passphrase and a fresh 128-bit random salt per save using `crypto_pwhash` (`Argon2id v1.3`).
   - Encrypts with a fresh 192-bit (24-byte) random nonce and authenticates the entire 44-byte header (`magic || salt || nonce`) as Additional Authenticated Data (AAD).
@@ -136,4 +139,3 @@ powershell -ExecutionPolicy Bypass -File scripts\package_release.ps1 -Version 2.
 ## License
 
 Released under the [MIT License](LICENSE). See [SECURITY.md](SECURITY.md) for the full threat model and vulnerability reporting instructions.
-

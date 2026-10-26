@@ -59,6 +59,22 @@ VV_API int vv_get_secret(
 // Deletes a named secret. Returns 1 on success, 0 if not found or locked.
 VV_API int vv_delete_secret(VoidVaultHandle* handle, const char* key);
 
+// Stores an in-memory-only secret that is wiped after `ttl_seconds`.
+// Values are not written to the encrypted VVKV1 file.
+VV_API int vv_set_ephemeral_secret(
+    VoidVaultHandle* handle,
+    const char* key,
+    const char* value,
+    uint64_t ttl_seconds);
+
+// Reads or deletes an in-memory-only secret. Expired entries are rejected.
+VV_API int vv_get_ephemeral_secret(
+    VoidVaultHandle* handle,
+    const char* key,
+    char* out_buf,
+    size_t out_buf_size);
+VV_API int vv_delete_ephemeral_secret(VoidVaultHandle* handle, const char* key);
+
 // Writes comma-separated stored key names into `out_csv_buf`. Returns 1 on success.
 VV_API int vv_list_keys(
     VoidVaultHandle* handle,

@@ -470,6 +470,23 @@ namespace
                 }
                 wipe(val_hex);
             }
+            else if (cmd == "SET_EPHEMERAL_SECRET")
+            {
+                std::string key, val_hex;
+                std::uint64_t ttl_seconds = 0;
+                in >> key >> ttl_seconds >> val_hex;
+                SecureBuffer val;
+                if (decodeHexToSecureBuffer(val_hex, val) &&
+                    broker.setEphemeralSecret(key, val.view(), ttl_seconds))
+                {
+                    std::cout << "OK saved\n" << std::flush;
+                }
+                else
+                {
+                    std::cout << "ERR set_ephemeral_secret_failed\n" << std::flush;
+                }
+                wipe(val_hex);
+            }
             else if (cmd == "GET_SECRET")
             {
                 std::string key, val;
@@ -484,6 +501,35 @@ namespace
                 else
                 {
                     std::cout << "ERR get_secret_failed\n" << std::flush;
+                }
+            }
+            else if (cmd == "GET_EPHEMERAL_SECRET")
+            {
+                std::string key, val;
+                in >> key;
+                if (broker.getEphemeralSecret(key, val))
+                {
+                    std::string hex = encodeHex(val);
+                    wipe(val);
+                    std::cout << "OK " << hex << '\n' << std::flush;
+                    wipe(hex);
+                }
+                else
+                {
+                    std::cout << "ERR get_ephemeral_secret_failed\n" << std::flush;
+                }
+            }
+            else if (cmd == "DELETE_EPHEMERAL_SECRET")
+            {
+                std::string key;
+                in >> key;
+                if (broker.deleteEphemeralSecret(key))
+                {
+                    std::cout << "OK deleted\n" << std::flush;
+                }
+                else
+                {
+                    std::cout << "ERR delete_ephemeral_secret_failed\n" << std::flush;
                 }
             }
             else if (cmd == "DELETE_SECRET")
@@ -1234,4 +1280,3 @@ int main(int argc, char **argv)
         }
     }
 }
-

@@ -176,6 +176,18 @@ int main()
         check(vv_setup_password(h, password.c_str()) == 1, "vv_setup_password succeeds");
         check(vv_unlock(h, password.c_str()) == 1 && vv_is_unlocked(h) == 1, "vv_unlock unlocks vault");
         check(vv_set_secret(h, "app.secret", "c-abi-payload") == 1, "vv_set_secret stores secret");
+        check(vv_set_ephemeral_secret(h, "app.temporary", "short-lived", 30) == 1,
+              "C ABI stores an ephemeral secret");
+        char ephemeral_buf[64]{};
+        check(vv_get_ephemeral_secret(
+                  h, "app.temporary", ephemeral_buf, sizeof(ephemeral_buf)) == 1 &&
+                  std::strcmp(ephemeral_buf, "short-lived") == 0,
+              "C ABI reads an ephemeral secret");
+        check(vv_delete_ephemeral_secret(h, "app.temporary") == 1,
+              "C ABI deletes an ephemeral secret");
+        check(vv_get_ephemeral_secret(
+                  h, "app.temporary", ephemeral_buf, sizeof(ephemeral_buf)) == 0,
+              "C ABI cannot read a deleted ephemeral secret");
 
         char token_buf[512]{};
         check(vv_issue_token(h, "c-client", "read:app.*", 300, token_buf, sizeof(token_buf)) == 1,

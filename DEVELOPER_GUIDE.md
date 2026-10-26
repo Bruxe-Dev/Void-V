@@ -170,6 +170,9 @@ All secret values and passwords on the wire are **lowercase hex-encoded** so bin
 | `SET_SECRET <key> <value_hex>` | `OK saved` | Stores or updates `<key>` inside the encrypted `VVKV1` container |
 | `GET_SECRET <key>` | `OK <value_hex>` | Retrieves and hex-encodes the value of `<key>` |
 | `DELETE_SECRET <key>` | `OK deleted` | Removes `<key>` from the encrypted container |
+| `SET_EPHEMERAL_SECRET <key> <ttl_sec> <value_hex>` | `OK saved` | Stores a value in broker memory only; maximum TTL is 24 hours |
+| `GET_EPHEMERAL_SECRET <key>` | `OK <value_hex>` | Reads the value only while the vault is unlocked and before its TTL expires |
+| `DELETE_EPHEMERAL_SECRET <key>` | `OK deleted` | Wipes and removes an in-memory-only value |
 | `LIST_KEYS` | `OK key1,key2,...` | Lists all user key names |
 | `ISSUE_TOKEN <app_id> <scope> <ttl_sec>` | `OK VVTOK1.<payload>.<mac>` | Issues a signed capability token |
 | `VERIFY_TOKEN <token> <app_id>` | `OK <scope> <expires_unix>` | Verifies token HMAC, TTL, and `app_id` |
@@ -182,6 +185,11 @@ All secret values and passwords on the wire are **lowercase hex-encoded** so bin
 | `RECOVER_WITH_KEY <rec_hex> <new_pw_hex>` | `OK recovered` | Recovers vault using Emergency Recovery Key and sets new password |
 | `VERIFY_AUDIT` | `OK <entry_count>` | Verifies the BLAKE2b-256 hash chain of `vault_audit.log` |
 | `QUIT` | `OK bye` | Locks the vault, wipes memory, and exits `0` |
+
+Ephemeral values are not included in `VVKV1`, are lost when the broker process exits,
+and are purged after expiry. A read rejects an expired value even if the background
+cleanup has not run yet. A value returned to a caller is copied into caller memory;
+the broker cannot wipe that copy later.
 
 ---
 
