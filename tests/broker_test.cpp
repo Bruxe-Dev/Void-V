@@ -73,11 +73,15 @@ int main()
         check(!broker.getEphemeralSecret("session.delete", val),
               "Deleted ephemeral secret is no longer readable");
 
+        check(broker.setEphemeralSecret("session.locked", "locked-value", 30),
+              "Save ephemeral secret before locking");
         vault.lock();
-        check(!broker.getEphemeralSecret("session.temporary", val),
+        check(!broker.getEphemeralSecret("session.locked", val),
               "Ephemeral reads rejected while vault is locked");
         check(vault.authenticate(password) && vault.unlock(),
               "Vault unlocked after ephemeral tests");
+        check(broker.deleteEphemeralSecret("session.locked"),
+              "Delete the still-live ephemeral secret after unlocking");
     }
 
     // --- 2. "Sign in with Void Vault" Scoped Capability Tokens & App Isolation ---

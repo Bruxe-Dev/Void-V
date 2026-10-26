@@ -39,9 +39,9 @@ struct CapabilityClaims
 // Embeddable Zero-Knowledge Key-Value Secret Store & Local OAuth-Style
 // Capability Broker ("Sign in / Authorize with Void Vault") built on top of Vault.
 //
-// All named secrets and internal broker signing/KDF keys are serialized inside
-// the single XChaCha20-Poly1305 AEAD encrypted vault payload ("VVKV1"), so
-// key names, secret counts, and values are completely hidden on disk.
+// Persistent named secrets and internal broker signing/KDF keys are serialized
+// inside the encrypted "VVKV1" payload. Ephemeral secrets remain in protected
+// process memory only and are wiped on expiry or broker destruction.
 class VaultBroker
 {
 public:

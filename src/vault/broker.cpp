@@ -981,7 +981,9 @@ bool VaultBroker::setEphemeralSecret(
 
     EphemeralSecret entry;
     entry.value.assign(value);
-    entry.expires_at = Clock::now() + std::chrono::seconds(ttl_seconds);
+    entry.expires_at = Clock::now() +
+                       std::chrono::seconds(
+                           static_cast<std::chrono::seconds::rep>(ttl_seconds));
 
     {
         std::lock_guard<std::mutex> lock(ephemeral_mutex_);
@@ -1020,7 +1022,7 @@ bool VaultBroker::getEphemeralSecret(
         }
 
         const std::string_view value = it->second.value.view();
-        out_value.assign(value.data(), value.size());
+        out_value.assign(value);
     }
 
     recordAudit("EPHEMERAL_SECRET_READ", "owner", key);
