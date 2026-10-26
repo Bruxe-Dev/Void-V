@@ -13,7 +13,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
-set(OPENSSL_USE_STATIC_LIBS TRUE)
+if(MINGW)
+    set(OPENSSL_USE_STATIC_LIBS TRUE)
+endif()
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
