@@ -13,6 +13,9 @@
 
 #include "vault.hpp"
 #include "../security/secure_buffer.hpp"
+#include "operation_engine.hpp"
+#include "pki_engine.hpp"
+#include "transit_engine.hpp"
 
 // Represents a parsed and verified "Sign in with Void Vault" capability token.
 // Format on the wire:
@@ -42,11 +45,12 @@ struct CapabilityClaims
 // Persistent named secrets and internal broker signing/KDF keys are serialized
 // inside the encrypted "VVKV1" payload. Ephemeral secrets remain in protected
 // process memory only and are wiped on expiry or broker destruction.
-class VaultBroker
+class VaultBroker : public OperationEngine
 {
 public:
     static constexpr std::size_t MAX_EPHEMERAL_SECRETS = 1024;
     static constexpr std::uint64_t MAX_EPHEMERAL_TTL_SECONDS = 86400;
+    static constexpr std::size_t MAX_EPHEMERAL_VALUE_SIZE = 4096;
     static constexpr std::uint64_t DEFAULT_TOKEN_TTL_SECONDS = 300; // 5 minutes
     static constexpr std::uint64_t MAX_TOKEN_TTL_SECONDS = 86400;   // 24 hours
     static constexpr std::size_t MAX_KEY_LENGTH = 256;
@@ -69,6 +73,37 @@ public:
 
     bool getEphemeralSecret(std::string_view key, std::string &out_value);
     bool deleteEphemeralSecret(std::string_view key);
+
+    bool transitEncrypt(
+        std::string_view token,
+        std::string_view app_id,
+        std::string_view key_id,
+        std::string_view plaintext,
+        std::string& out_ciphertext,
+        std::uint64_t now_unix = 0);
+
+    bool transitDecrypt(
+        std::string_view token,
+        std::string_view app_id,
+        std::string_view key_id,
+        std::string_view ciphertext,
+        std::string& out_plaintext,
+        std::uint64_t now_unix = 0);
+
+    bool createPkiAuthority(
+        std::string_view authority_id,
+        std::string_view common_name,
+        std::string& out_certificate);
+    bool issuePkiCertificate(
+        std::string_view authority_id,
+        std::string_view common_name,
+        std::uint64_t validity_days,
+        std::string& out_certificate);
+
+    EngineKind kind() const noexcept override { return EngineKind::KeyValue; }
+    bool supportsOperation(std::string_view operation) const noexcept override;
+    OperationEngine& transitEngine() noexcept { return transit_engine_; }
+    OperationEngine& pkiEngine() noexcept { return pki_engine_; }
 
     // --- "Sign in with Void Vault" Delegated App Authorization ---
     // Issues a cryptographically signed (HMAC-SHA512256), time-bounded
@@ -149,6 +184,9 @@ private:
     bool loadStore(std::vector<KeyValue>& entries, unsigned char master_key[32], bool& has_master_key);
     bool saveStore(const std::vector<KeyValue>& entries, const unsigned char master_key[32]);
     bool ensureBrokerKey(std::vector<KeyValue>& entries, unsigned char master_key[32]);
+    bool ensureTransitKey(unsigned char transit_key[32]);
+    bool storeInternalSecret(std::string_view key, std::string_view value);
+    bool loadInternalSecret(std::string_view key, std::string& out_value);
 
     Vault& vault_;
     std::unordered_map<std::string, EphemeralSecret> ephemeral_secrets_;
@@ -156,6 +194,8 @@ private:
     std::condition_variable ephemeral_cv_;
     std::thread expiry_thread_;
     bool stop_expiry_thread_ = false;
+    TransitEngine transit_engine_;
+    PkiEngine pki_engine_;
 
 };
 

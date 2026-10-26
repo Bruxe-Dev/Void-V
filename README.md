@@ -24,6 +24,16 @@ It provides defense-in-depth local secret protection with **Argon2id (v1.3)** ke
 - **In-Memory Ephemeral Secrets**
   - Store separate TTL-bound values in broker memory without writing them to `VVKV1`; reads reject expired values and a cleanup worker wipes expired entries.
   - Ephemeral values disappear when the broker exits. Callers that read a value receive their own copy, which the broker cannot erase.
+- **Modular Broker Engines**
+  - A shared operation-engine interface routes key-value, Transit, and PKI operations to separate implementations.
+- **Daemon-Backed Transit Encryption**
+  - A separate-process C ABI client sends plaintext bytes to `void_vault --broker` and receives ciphertext without loading the Transit master key into caller memory.
+  - Transit operations use scoped `transit:encrypt` / `transit:decrypt` tokens and a dedicated cryptographic key.
+- **PKI Certificate Authority**
+  - Creates Ed25519 authorities and issues leaf certificates; private CA material remains in encrypted vault storage.
+- **Opt-In OS-Backed Auto-Unseal**
+  - Protects a local unseal fragment using current-user Windows DPAPI or the Linux user keyring, enabling a trusted local broker to attempt unlock at startup.
+  - This is a local convenience and does not protect against another process running as the same OS user.
 - **XChaCha20-Poly1305 IETF Authenticated Encryption (`VV02` / `VV2M` / `VV2S`)**
   - Derives a 256-bit key from the user's passphrase and a fresh 128-bit random salt per save using `crypto_pwhash` (`Argon2id v1.3`).
   - Encrypts with a fresh 192-bit (24-byte) random nonce and authenticates the entire 44-byte header (`magic || salt || nonce`) as Additional Authenticated Data (AAD).
@@ -49,12 +59,16 @@ void-vault/
 │   │   ├── auth.hpp / auth.cpp     # Authorizer (VVAUTH1 persistence, lockout, password quality & rotation)
 │   │   ├── encryption.hpp / .cpp   # Encryption (Argon2id + XChaCha20-Poly1305 AEAD + VV01 compatibility)
 │   │   ├── process_hardening.hpp   # OS crash-dump / core-dump / ptrace mitigations
+│   │   ├── auto_unseal.cpp         # Windows DPAPI / Linux user-keyring fragment protection
 │   │   └── secure_buffer.hpp       # sodium_malloc RAII buffer with constant-time comparison
 │   ├── storage/
 │   │   └── storage.cpp             # Atomic writes, owner-only ACLs, symlink checks, FileLock
 │   └── vault/
 │       ├── vault.hpp / vault.cpp   # Vault state machine, password rotation & Emergency Recovery Keys
-│       ├── broker.hpp / broker.cpp # Encrypted VVKV1 key-value store, VVTOK1 tokens & BLAKE2b KDF
+│       ├── broker.hpp / broker.cpp # VVKV1 store, ephemeral TTL secrets & capability broker
+│       ├── operation_engine.hpp    # Common engine interface and operation router
+│       ├── transit_engine.cpp      # Transit authenticated encryption
+│       ├── pki_engine.cpp          # Ed25519 CA and leaf-certificate operations
 │       └── void_vault_c.cpp        # Universal C ABI v2 implementation (void_vault.dll)
 ├── sdk/
 │   └── python/
@@ -92,7 +106,7 @@ with vault.session(user_id="customer_1042", passphrase=user_pin) as secrets:
 # Automatically locked & wiped in RAM when exiting the `with` block!
 ```
 
-See [**DEVELOPER_GUIDE.md**](DEVELOPER_GUIDE.md) for complete documentation on `VaultApp`, `@VaultApp.require_scope`, `void_vault.dll` C ABI v2, and the `--broker` IPC protocol.
+See [**DEVELOPER_GUIDE.md**](DEVELOPER_GUIDE.md) for `VaultApp`, capability scopes, daemon-backed Transit, PKI operations, auto-unseal, the C ABI, and the `--broker` IPC protocol.
 
 ---
 

@@ -13,6 +13,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
+set(OPENSSL_USE_STATIC_LIBS TRUE)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
 
@@ -129,6 +131,8 @@ endif()
 add_library(void_vault_core STATIC
     src/vault/vault.cpp
     src/vault/broker.cpp
+    src/vault/transit_engine.cpp
+    src/vault/pki_engine.cpp
     src/vault/void_vault_c.cpp
     src/security/audit_log.cpp
     src/security/auto_unseal.cpp
@@ -151,11 +155,14 @@ target_link_libraries(
     void_vault_options
     ${VOID_VAULT_SODIUM_LIBS}
     Threads::Threads
+    OpenSSL::Crypto
 )
 
 add_library(void_vault_shared SHARED
     src/vault/vault.cpp
     src/vault/broker.cpp
+    src/vault/transit_engine.cpp
+    src/vault/pki_engine.cpp
     src/vault/void_vault_c.cpp
     src/security/audit_log.cpp
     src/security/auto_unseal.cpp
@@ -177,6 +184,7 @@ target_link_libraries(
     void_vault_options
     ${VOID_VAULT_SODIUM_LIBS}
     Threads::Threads
+    OpenSSL::Crypto
 )
 set_target_properties(void_vault_shared PROPERTIES
     OUTPUT_NAME "void_vault"

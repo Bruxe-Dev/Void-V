@@ -6,6 +6,14 @@ foreach(test_name storage_test auth_test encryption_test vault_test broker_test)
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 endforeach()
 
+add_executable(daemon_client_test daemon_client_test.cpp test_util.hpp)
+target_link_libraries(daemon_client_test PRIVATE void_vault_core)
+add_test(
+    NAME daemon_client_test
+    COMMAND daemon_client_test $<TARGET_FILE:void_vault>)
+set_tests_properties(daemon_client_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
 # End-to-end: the real application executed as separate processes.
 add_test(
     NAME app_e2e_test

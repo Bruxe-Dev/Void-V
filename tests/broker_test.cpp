@@ -158,6 +158,78 @@ int main()
                   key_med_1 != key_trader_1,
               "Different app_id derives completely isolated subkey");
 
+        std::string transit_encrypt_token;
+        std::string transit_decrypt_token;
+        check(broker.issueToken(
+                  "transit-client", "transit:encrypt", 300,
+                  transit_encrypt_token, 1000),
+              "Issue Transit encryption token");
+        check(broker.issueToken(
+                  "transit-client", "transit:decrypt", 300,
+                  transit_decrypt_token, 1000),
+              "Issue Transit decryption token");
+
+        const std::string transit_plaintext("binary\0payload", 14);
+        std::string transit_ciphertext;
+        std::string transit_roundtrip;
+        check(broker.transitEncrypt(
+                  transit_encrypt_token,
+                  "transit-client",
+                  "payments-v1",
+                  transit_plaintext,
+                  transit_ciphertext,
+                  1100),
+              "Transit encrypts plaintext inside the broker");
+        check(broker.transitDecrypt(
+                  transit_decrypt_token,
+                  "transit-client",
+                  "payments-v1",
+                  transit_ciphertext,
+                  transit_roundtrip,
+                  1100) &&
+                  transit_roundtrip == transit_plaintext,
+              "Transit decrypts binary payload with matching key id");
+        check(!broker.transitDecrypt(
+                  transit_decrypt_token,
+                  "transit-client",
+                  "different-key",
+                  transit_ciphertext,
+                  transit_roundtrip,
+                  1100),
+              "Transit rejects ciphertext under a different key id");
+        std::string transit_denied;
+        check(!broker.transitEncrypt(
+                  transit_decrypt_token,
+                  "transit-client",
+                  "payments-v1",
+                  transit_plaintext,
+                  transit_denied,
+                  1100),
+              "Transit encryption token cannot decrypt or encrypt without matching scope");
+
+        std::string ca_certificate;
+        check(broker.createPkiAuthority(
+                      "integration-root", "Void Vault Test Root", ca_certificate) &&
+                      ca_certificate.find("BEGIN CERTIFICATE") != std::string::npos &&
+                      ca_certificate.find("BEGIN PRIVATE KEY") == std::string::npos,
+                  "PKI engine creates and returns a public CA certificate");
+        std::string issued_certificate;
+        check(broker.issuePkiCertificate(
+                      "integration-root", "service.example.test", 90,
+                      issued_certificate) &&
+                      issued_certificate.find("BEGIN CERTIFICATE") != std::string::npos,
+                  "PKI engine issues a leaf certificate using the vault-held CA key");
+        check(!broker.createPkiAuthority(
+                      "integration-root", "Replacement Root", ca_certificate),
+                  "PKI engine refuses to overwrite an existing certificate authority");
+        check(!broker.issuePkiCertificate(
+                      "integration-root", "invalid.example.test", 826,
+                      issued_certificate),
+                  "PKI engine rejects certificate validity beyond its limit");
+        const std::string pki_disk_cipher = tu::readAll(data_file);
+        check(pki_disk_cipher.find("BEGIN PRIVATE KEY") == std::string::npos,
+                  "PKI private key is not stored in plaintext on disk");
+
         // --- 4. Per-App & Global Token Revocation ---
         check(broker.revokeAppTokens("void-trader"), "revokeAppTokens(void-trader) succeeds");
         check(!broker.verifyToken(trader_read_token, "void-trader", claims, 1100),
@@ -168,6 +240,19 @@ int main()
         check(broker.revokeAllTokens(), "revokeAllTokens rotates internal broker key");
         check(!broker.verifyToken(med_token, "medical-app", claims, 1100),
               "All remaining tokens invalidated after revokeAllTokens");
+        std::string renewed_transit_token;
+        check(broker.issueToken(
+                  "transit-client", "transit:decrypt", 300,
+                  renewed_transit_token, 1200) &&
+                  broker.transitDecrypt(
+                      renewed_transit_token,
+                      "transit-client",
+                      "payments-v1",
+                      transit_ciphertext,
+                      transit_roundtrip,
+                      1201) &&
+                  transit_roundtrip == transit_plaintext,
+              "Token revocation does not rotate or destroy Transit encryption keys");
     }
 
     // --- 5. Universal C ABI v2 (void_vault_c.h) test ---

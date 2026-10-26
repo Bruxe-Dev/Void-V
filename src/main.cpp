@@ -394,6 +394,15 @@ namespace
         VaultBroker &broker,
         AuditLog &audit_log)
     {
+        EngineRouter engine_router;
+        if (!engine_router.registerEngine(broker) ||
+            !engine_router.registerEngine(broker.transitEngine()) ||
+            !engine_router.registerEngine(broker.pkiEngine()))
+        {
+            std::cerr << "Broker engine registration failed.\n";
+            return 8;
+        }
+
         SecureBuffer line_buf;
         while (readSecureStreamLine(line_buf))
         {
@@ -408,6 +417,19 @@ namespace
             std::istringstream in(line);
             std::string cmd;
             in >> cmd;
+            OperationEngine* routed_engine = engine_router.route(cmd);
+            const bool control_operation =
+                cmd == "QUIT" || cmd == "SETUP" || cmd == "UNLOCK" ||
+                cmd == "LOCK" || cmd == "ENABLE_AUTO_UNSEAL" ||
+                cmd == "DISABLE_AUTO_UNSEAL" ||
+                cmd == "GENERATE_RECOVERY_KEY" ||
+                cmd == "RECOVER_WITH_KEY" || cmd == "VERIFY_AUDIT";
+            if (routed_engine == nullptr && !control_operation)
+            {
+                std::cout << "ERR unknown_command\n" << std::flush;
+                wipe(line);
+                continue;
+            }
 
             if (cmd == "QUIT")
             {
@@ -669,6 +691,108 @@ namespace
                 {
                     std::cout << "ERR derive_key_denied\n" << std::flush;
                 }
+            }
+            else if (routed_engine != nullptr &&
+                     routed_engine->kind() == EngineKind::Transit &&
+                     cmd == "TRANSIT_ENCRYPT")
+            {
+                std::string token, app_id, key_id, plaintext_hex;
+                in >> token >> app_id >> key_id >> plaintext_hex;
+                SecureBuffer plaintext;
+                std::string ciphertext;
+                const bool decoded = plaintext_hex == "-"
+                    ? true
+                    : decodeHexToSecureBuffer(plaintext_hex, plaintext);
+                if (decoded &&
+                    broker.transitEncrypt(
+                        token, app_id, key_id, plaintext.view(), ciphertext))
+                {
+                    std::string ciphertext_hex = encodeHex(ciphertext);
+                    wipe(ciphertext);
+                    std::cout << "OK " << ciphertext_hex << '\n' << std::flush;
+                    wipe(ciphertext_hex);
+                }
+                else
+                {
+                    std::cout << "ERR transit_encrypt_denied\n" << std::flush;
+                }
+                wipe(plaintext_hex);
+            }
+            else if (routed_engine != nullptr &&
+                     routed_engine->kind() == EngineKind::Transit &&
+                     cmd == "TRANSIT_DECRYPT")
+            {
+                std::string token, app_id, key_id, ciphertext_hex;
+                in >> token >> app_id >> key_id >> ciphertext_hex;
+                SecureBuffer ciphertext;
+                std::string plaintext;
+                const bool decoded = ciphertext_hex == "-"
+                    ? true
+                    : decodeHexToSecureBuffer(ciphertext_hex, ciphertext);
+                if (decoded &&
+                    broker.transitDecrypt(
+                        token, app_id, key_id, ciphertext.view(), plaintext))
+                {
+                    std::string plaintext_hex = encodeHex(plaintext);
+                    wipe(plaintext);
+                    std::cout << "OK " << plaintext_hex << '\n' << std::flush;
+                    wipe(plaintext_hex);
+                }
+                else
+                {
+                    std::cout << "ERR transit_decrypt_denied\n" << std::flush;
+                }
+                wipe(ciphertext_hex);
+            }
+            else if (routed_engine != nullptr &&
+                     routed_engine->kind() == EngineKind::Pki &&
+                     cmd == "PKI_CREATE_CA")
+            {
+                std::string authority_id, common_name_hex;
+                in >> authority_id >> common_name_hex;
+                SecureBuffer common_name;
+                std::string certificate;
+                if (decodeHexToSecureBuffer(common_name_hex, common_name) &&
+                    broker.createPkiAuthority(
+                        authority_id, common_name.view(), certificate))
+                {
+                    std::string certificate_hex = encodeHex(certificate);
+                    wipe(certificate);
+                    std::cout << "OK " << certificate_hex << '\n' << std::flush;
+                    wipe(certificate_hex);
+                }
+                else
+                {
+                    std::cout << "ERR pki_create_ca_failed\n" << std::flush;
+                }
+                wipe(common_name_hex);
+            }
+            else if (routed_engine != nullptr &&
+                     routed_engine->kind() == EngineKind::Pki &&
+                     cmd == "PKI_ISSUE_CERTIFICATE")
+            {
+                std::string authority_id, common_name_hex;
+                std::uint64_t validity_days = 0;
+                in >> authority_id >> validity_days >> common_name_hex;
+                SecureBuffer common_name;
+                std::string certificate;
+                if (decodeHexToSecureBuffer(common_name_hex, common_name) &&
+                    broker.issuePkiCertificate(
+                        authority_id,
+                        common_name.view(),
+                        validity_days,
+                        certificate))
+                {
+                    std::string certificate_hex = encodeHex(certificate);
+                    wipe(certificate);
+                    std::cout << "OK " << certificate_hex << '\n' << std::flush;
+                    wipe(certificate_hex);
+                }
+                else
+                {
+                    std::cout << "ERR pki_issue_certificate_failed\n" << std::flush;
+                }
+                wipe(common_name_hex);
             }
             else if (cmd == "REVOKE_TOKENS")
             {

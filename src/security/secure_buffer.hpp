@@ -19,7 +19,7 @@ class SecureBuffer
 {
 public:
     static constexpr std::size_t DEFAULT_CAPACITY = 256;
-    static constexpr std::size_t MAX_CAPACITY = 4096;
+    static constexpr std::size_t MAX_CAPACITY = 65536;
 
     SecureBuffer()
     {

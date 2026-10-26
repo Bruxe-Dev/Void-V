@@ -28,6 +28,7 @@ jobs:
             mingw-w64-ucrt-x86_64-make
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-libsodium
+            mingw-w64-ucrt-x86_64-openssl
 
       - name: Build, Test, and Package
         run: |
@@ -68,7 +69,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake pkg-config libsodium-dev
+          sudo apt-get install -y build-essential cmake pkg-config libsodium-dev libssl-dev
 
       - name: Build, Test, and Package
         run: |

@@ -126,6 +126,13 @@ namespace
         return true;
     }
 
+    bool scopeAllowsTransit(std::string_view scope, std::string_view operation) noexcept
+    {
+        return scope == "*" ||
+               scope == "transit:*" ||
+               scope == operation;
+    }
+
     std::string appGenKey(std::string_view app_id)
     {
         std::string k(INTERNAL_APP_GEN_PREFIX);
@@ -215,6 +222,24 @@ bool VaultBroker::isValidKeyName(std::string_view key) noexcept
         return false;
     }
     return true;
+}
+
+bool VaultBroker::supportsOperation(std::string_view operation) const noexcept
+{
+    return operation == "SET_SECRET" ||
+           operation == "GET_SECRET" ||
+           operation == "DELETE_SECRET" ||
+           operation == "LIST_KEYS" ||
+           operation == "SET_EPHEMERAL_SECRET" ||
+           operation == "GET_EPHEMERAL_SECRET" ||
+           operation == "DELETE_EPHEMERAL_SECRET" ||
+           operation == "ISSUE_TOKEN" ||
+           operation == "VERIFY_TOKEN" ||
+           operation == "TOKEN_GET_SECRET" ||
+           operation == "TOKEN_SET_SECRET" ||
+           operation == "DERIVE_APP_KEY" ||
+           operation == "REVOKE_TOKENS" ||
+           operation == "REVOKE_APP_TOKENS";
 }
 
 bool VaultBroker::scopeAllowsRead(std::string_view scope, std::string_view key) noexcept
@@ -406,6 +431,135 @@ bool VaultBroker::ensureBrokerKey(
         }
     }
     return true;
+}
+
+bool VaultBroker::ensureTransitKey(unsigned char transit_key[32])
+{
+    static constexpr char TRANSIT_MASTER_KEY_NAME[] = "__vv_transit_master_key__";
+    std::vector<KeyValue> entries;
+    unsigned char broker_key[32]{};
+    if (!ensureBrokerKey(entries, broker_key))
+    {
+        sodium_memzero(transit_key, 32);
+        sodium_memzero(broker_key, sizeof(broker_key));
+        return false;
+    }
+
+    bool has_transit_key = false;
+    for (auto& entry : entries)
+    {
+        if (entry.key == TRANSIT_MASTER_KEY_NAME && entry.value.size() == 32)
+        {
+            std::memcpy(transit_key, entry.value.data(), 32);
+            has_transit_key = true;
+        }
+    }
+
+    bool saved = true;
+    if (!has_transit_key)
+    {
+        randombytes_buf(transit_key, 32);
+        entries.push_back(KeyValue{
+            TRANSIT_MASTER_KEY_NAME,
+            std::string(reinterpret_cast<const char*>(transit_key), 32)});
+        saved = saveStore(entries, broker_key);
+    }
+
+    sodium_memzero(broker_key, sizeof(broker_key));
+    for (auto& entry : entries)
+    {
+        wipeString(entry.value);
+    }
+    if (!saved)
+    {
+        sodium_memzero(transit_key, 32);
+        return false;
+    }
+    return true;
+}
+
+bool VaultBroker::storeInternalSecret(std::string_view key, std::string_view value)
+{
+    if ((key.rfind("__vv_pki_ca_", 0) != 0 &&
+         key != "__vv_transit_master_key__") ||
+        key.size() > MAX_KEY_LENGTH + 16 ||
+        !vault_.isUnlocked())
+    {
+        return false;
+    }
+
+    std::vector<KeyValue> entries;
+    unsigned char master_key[32]{};
+    bool has_key = false;
+    if (!loadStore(entries, master_key, has_key))
+    {
+        sodium_memzero(master_key, sizeof(master_key));
+        return false;
+    }
+    if (!has_key)
+    {
+        randombytes_buf(master_key, sizeof(master_key));
+    }
+
+    bool updated = false;
+    for (auto& entry : entries)
+    {
+        if (entry.key == key)
+        {
+            wipeString(entry.value);
+            entry.value.assign(value);
+            updated = true;
+            break;
+        }
+    }
+    if (!updated)
+    {
+        entries.push_back(KeyValue{std::string(key), std::string(value)});
+    }
+
+    const bool saved = saveStore(entries, master_key);
+    sodium_memzero(master_key, sizeof(master_key));
+    for (auto& entry : entries)
+    {
+        wipeString(entry.value);
+    }
+    return saved;
+}
+
+bool VaultBroker::loadInternalSecret(std::string_view key, std::string& out_value)
+{
+    if ((key.rfind("__vv_pki_ca_", 0) != 0 &&
+         key != "__vv_transit_master_key__") ||
+        key.size() > MAX_KEY_LENGTH + 16)
+    {
+        return false;
+    }
+
+    std::vector<KeyValue> entries;
+    unsigned char master_key[32]{};
+    bool has_key = false;
+    if (!loadStore(entries, master_key, has_key) || !has_key)
+    {
+        sodium_memzero(master_key, sizeof(master_key));
+        for (auto& entry : entries)
+        {
+            wipeString(entry.value);
+        }
+        return false;
+    }
+    sodium_memzero(master_key, sizeof(master_key));
+
+    bool found = false;
+    for (auto& entry : entries)
+    {
+        if (entry.key == key)
+        {
+            out_value.assign(entry.value);
+            found = true;
+        }
+        wipeString(entry.value);
+    }
+    return found;
 }
 
 bool VaultBroker::setSecret(std::string_view key, std::string_view value)
@@ -988,7 +1142,7 @@ bool VaultBroker::setEphemeralSecret(
     if (!isValidKeyName(key) ||
         ttl_seconds == 0 ||
         ttl_seconds > MAX_EPHEMERAL_TTL_SECONDS ||
-        value.size() > SecureBuffer::MAX_CAPACITY)
+        value.size() > MAX_EPHEMERAL_VALUE_SIZE)
     {
         return false;
     }
@@ -1082,4 +1236,179 @@ bool VaultBroker::deleteEphemeralSecret(std::string_view key)
         recordAudit("EPHEMERAL_SECRET_DELETED", "owner", key);
     }
     return removed;
+}
+
+bool VaultBroker::transitEncrypt(
+    std::string_view token,
+    std::string_view app_id,
+    std::string_view key_id,
+    std::string_view plaintext,
+    std::string& out_ciphertext,
+    std::uint64_t now_unix)
+{
+    CapabilityClaims claims;
+    if (!verifyToken(token, app_id, claims, now_unix) ||
+        !scopeAllowsTransit(claims.scope, "transit:encrypt") ||
+        plaintext.size() > TransitEngine::MAX_MESSAGE_SIZE)
+    {
+        recordAudit("TRANSIT_ENCRYPT_DENIED", app_id, key_id);
+        return false;
+    }
+
+    unsigned char root_key[32]{};
+    if (!ensureTransitKey(root_key))
+    {
+        sodium_memzero(root_key, sizeof(root_key));
+        return false;
+    }
+
+    const bool encrypted =
+        transit_engine_.encrypt(root_key, key_id, plaintext, out_ciphertext);
+    sodium_memzero(root_key, sizeof(root_key));
+    if (encrypted)
+    {
+        recordAudit("TRANSIT_ENCRYPTED", app_id, key_id);
+    }
+    return encrypted;
+}
+
+bool VaultBroker::transitDecrypt(
+    std::string_view token,
+    std::string_view app_id,
+    std::string_view key_id,
+    std::string_view ciphertext,
+    std::string& out_plaintext,
+    std::uint64_t now_unix)
+{
+    CapabilityClaims claims;
+    if (!verifyToken(token, app_id, claims, now_unix) ||
+        !scopeAllowsTransit(claims.scope, "transit:decrypt"))
+    {
+        recordAudit("TRANSIT_DECRYPT_DENIED", app_id, key_id);
+        return false;
+    }
+
+    unsigned char root_key[32]{};
+    if (!ensureTransitKey(root_key))
+    {
+        sodium_memzero(root_key, sizeof(root_key));
+        return false;
+    }
+
+    const bool decrypted =
+        transit_engine_.decrypt(root_key, key_id, ciphertext, out_plaintext);
+    sodium_memzero(root_key, sizeof(root_key));
+    if (decrypted)
+    {
+        recordAudit("TRANSIT_DECRYPTED", app_id, key_id);
+    }
+    else
+    {
+        recordAudit("TRANSIT_DECRYPT_FAILED", app_id, key_id);
+    }
+    return decrypted;
+}
+
+bool VaultBroker::createPkiAuthority(
+    std::string_view authority_id,
+    std::string_view common_name,
+    std::string& out_certificate)
+{
+    if (!isSafeIdentifier(authority_id) ||
+        authority_id.size() > MAX_KEY_LENGTH ||
+        !vault_.isUnlocked())
+    {
+        return false;
+    }
+
+    const std::string internal_key =
+        "__vv_pki_ca_" + std::string(authority_id);
+    std::vector<KeyValue> entries;
+    unsigned char master_key[32]{};
+    bool has_key = false;
+    if (!loadStore(entries, master_key, has_key))
+    {
+        sodium_memzero(master_key, sizeof(master_key));
+        return false;
+    }
+    sodium_memzero(master_key, sizeof(master_key));
+
+    bool exists = false;
+    for (auto& entry : entries)
+    {
+        exists = exists || entry.key == internal_key;
+        wipeString(entry.value);
+    }
+    if (exists)
+    {
+        return false;
+    }
+
+    std::string private_bundle;
+    std::string certificate;
+    if (!pki_engine_.createAuthority(common_name, private_bundle, certificate))
+    {
+        return false;
+    }
+
+    const bool saved = storeInternalSecret(internal_key, private_bundle);
+    if (!private_bundle.empty())
+    {
+        sodium_memzero(private_bundle.data(), private_bundle.size());
+    }
+    if (!saved)
+    {
+        if (!certificate.empty())
+        {
+            sodium_memzero(certificate.data(), certificate.size());
+        }
+        return false;
+    }
+
+    out_certificate = std::move(certificate);
+    recordAudit("PKI_AUTHORITY_CREATED", "owner", authority_id);
+    return true;
+}
+
+bool VaultBroker::issuePkiCertificate(
+    std::string_view authority_id,
+    std::string_view common_name,
+    std::uint64_t validity_days,
+    std::string& out_certificate)
+{
+    if (!isSafeIdentifier(authority_id) ||
+        authority_id.size() > MAX_KEY_LENGTH ||
+        !vault_.isUnlocked())
+    {
+        return false;
+    }
+
+    const std::string internal_key =
+        "__vv_pki_ca_" + std::string(authority_id);
+    std::string private_bundle;
+    if (!loadInternalSecret(internal_key, private_bundle))
+    {
+        return false;
+    }
+
+    std::string certificate;
+    const bool issued = pki_engine_.issueCertificate(
+        private_bundle, common_name, validity_days, certificate);
+    if (!private_bundle.empty())
+    {
+        sodium_memzero(private_bundle.data(), private_bundle.size());
+    }
+    if (!issued)
+    {
+        if (!certificate.empty())
+        {
+            sodium_memzero(certificate.data(), certificate.size());
+        }
+        recordAudit("PKI_CERTIFICATE_ISSUE_FAILED", "owner", authority_id);
+        return false;
+    }
+
+    out_certificate = std::move(certificate);
+    recordAudit("PKI_CERTIFICATE_ISSUED", "owner", authority_id);
+    return true;
 }

@@ -306,7 +306,7 @@ class VoidVaultNativeClient:
         if self._auto_unseal:
             try:
                 self.auto_unseal()
-            except Exception:
+            except VoidVaultError:
                 self.close()
                 raise
         return self
@@ -662,6 +662,41 @@ class VoidVaultClient:
         key_hex = self._request(f"DERIVE_APP_KEY {token} {app_id} {int(subkey_id)}")
         return bytes.fromhex(key_hex)
 
+    def transit_encrypt(
+        self, token: str, app_id: str, key_id: str, plaintext: bytes
+    ) -> bytes:
+        payload_hex = bytes(plaintext).hex()
+        ciphertext_hex = self._request(
+            f"TRANSIT_ENCRYPT {token} {app_id} {key_id} {payload_hex}"
+        )
+        return bytes.fromhex(ciphertext_hex)
+
+    def transit_decrypt(
+        self, token: str, app_id: str, key_id: str, ciphertext: bytes
+    ) -> bytes:
+        ciphertext_hex = bytes(ciphertext).hex()
+        plaintext_hex = self._request(
+            f"TRANSIT_DECRYPT {token} {app_id} {key_id} {ciphertext_hex}"
+        )
+        return bytes.fromhex(plaintext_hex)
+
+    def pki_create_authority(self, authority_id: str, common_name: str) -> str:
+        common_name_hex = common_name.encode("utf-8").hex()
+        certificate_hex = self._request(
+            f"PKI_CREATE_CA {authority_id} {common_name_hex}"
+        )
+        return bytes.fromhex(certificate_hex).decode("ascii")
+
+    def pki_issue_certificate(
+        self, authority_id: str, common_name: str, validity_days: int = 90
+    ) -> str:
+        common_name_hex = common_name.encode("utf-8").hex()
+        certificate_hex = self._request(
+            f"PKI_ISSUE_CERTIFICATE {authority_id} "
+            f"{int(validity_days)} {common_name_hex}"
+        )
+        return bytes.fromhex(certificate_hex).decode("ascii")
+
     def revoke_all_tokens(self) -> None:
         self._request("REVOKE_TOKENS")
 
@@ -753,6 +788,26 @@ class ScopedSession:
         for this application without exposing the user's master password.
         """
         return self._backend.derive_app_key(self.token, self.app_id, subkey_id=subkey_id)
+
+    def transit_encrypt(self, key_id: str, plaintext: bytes) -> bytes:
+        """Encrypts data in the daemon; requires a daemon IPC backend and transit:encrypt scope."""
+        if not isinstance(self._backend, VoidVaultClient):
+            raise VoidVaultError(
+                "Transit requires the daemon IPC backend; configure prefer_native_dll=False"
+            )
+        return self._backend.transit_encrypt(
+            self.token, self.app_id, key_id, plaintext
+        )
+
+    def transit_decrypt(self, key_id: str, ciphertext: bytes) -> bytes:
+        """Decrypts data in the daemon; requires a daemon IPC backend and transit:decrypt scope."""
+        if not isinstance(self._backend, VoidVaultClient):
+            raise VoidVaultError(
+                "Transit requires the daemon IPC backend; configure prefer_native_dll=False"
+            )
+        return self._backend.transit_decrypt(
+            self.token, self.app_id, key_id, ciphertext
+        )
 
     def issue_delegated_token(self, target_app_id: str, scope: str, ttl_seconds: int = 300) -> str:
         """Mints a secondary capability token for a downstream microservice/worker."""
@@ -876,9 +931,7 @@ class VaultApp:
         effective_scope = scope or self.scope
 
         with self._create_backend(data_dir) as backend:
-            if self.auto_unseal:
-                backend.auto_unseal()
-            elif not auth_file.exists():
+            if not self.auto_unseal and not auth_file.exists():
                 if not auto_setup:
                     raise VoidVaultError(f"Vault is not initialized in {data_dir}")
                 backend.setup_account(passphrase)

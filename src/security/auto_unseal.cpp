@@ -3,6 +3,7 @@
 #include <sodium.h>
 
 #include <array>
+#include <cctype>
 #include <filesystem>
 #include <string>
 #include <system_error>
@@ -26,10 +27,37 @@ namespace
 {
     constexpr char KEY_DESCRIPTION_PREFIX[] = "void-vault-autounseal-";
 
-    std::string keyDescription(const std::string& vault_path)
+    std::string normalizeVaultPath(const std::string& vault_path)
+    {
+        std::error_code ec;
+        const std::filesystem::path absolute =
+            std::filesystem::absolute(vault_path, ec);
+        if (ec)
+        {
+            return {};
+        }
+        const std::filesystem::path canonical =
+            std::filesystem::weakly_canonical(absolute, ec);
+        if (ec)
+        {
+            return {};
+        }
+        std::string normalized = canonical.lexically_normal().string();
+#ifdef _WIN32
+        for (char& character : normalized)
+        {
+            character = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(character)));
+        }
+#endif
+        return normalized;
+    }
+
+    std::string keyDescription(const std::string& normalized_vault_path)
     {
         std::array<unsigned char, crypto_generichash_BYTES> digest{};
-        const std::string context = "Void Vault OS auto-unseal v1:" + vault_path;
+        const std::string context =
+            "Void Vault OS auto-unseal v1:" + normalized_vault_path;
         crypto_generichash(
             digest.data(),
             digest.size(),
@@ -44,7 +72,7 @@ namespace
         return std::string(KEY_DESCRIPTION_PREFIX) + hex.data();
     }
 
-#ifndef _WIN32
+#ifdef __linux__
     long addKey(
         const char* type,
         const char* description,
@@ -92,7 +120,8 @@ bool AutoUnsealStore::protectFragment(
     const std::string& vault_path,
     std::string_view fragment)
 {
-    if (vault_path.empty() || fragment.size() != 32 ||
+    const std::string normalized_path = normalizeVaultPath(vault_path);
+    if (normalized_path.empty() || fragment.size() != 32 ||
         sodium_init() < 0)
     {
         return false;
@@ -109,7 +138,8 @@ bool AutoUnsealStore::protectFragment(
     input.cbData = static_cast<DWORD>(fragment.size());
     DATA_BLOB entropy{};
     std::array<unsigned char, crypto_generichash_BYTES> digest{};
-    const std::string context = "Void Vault OS auto-unseal v1:" + vault_path;
+    const std::string context =
+        "Void Vault OS auto-unseal v1:" + normalized_path;
     crypto_generichash(
         digest.data(),
         digest.size(),
@@ -138,12 +168,13 @@ bool AutoUnsealStore::protectFragment(
     const std::string blob(
         reinterpret_cast<const char*>(encrypted.pbData),
         encrypted.cbData);
-    const bool saved = Storage::atomicWrite(vault_path + ".oskey", blob, true);
+    const bool saved =
+        Storage::atomicWrite(normalized_path + ".oskey", blob, true);
     sodium_memzero(encrypted.pbData, encrypted.cbData);
     LocalFree(encrypted.pbData);
     return saved;
 #elif defined(__linux__)
-    const std::string description = keyDescription(vault_path);
+    const std::string description = keyDescription(normalized_path);
     const long serial = addKey(
         "user",
         description.c_str(),
@@ -160,14 +191,15 @@ bool AutoUnsealStore::unprotectFragment(
     const std::string& vault_path,
     std::string& fragment)
 {
-    if (vault_path.empty() || sodium_init() < 0)
+    const std::string normalized_path = normalizeVaultPath(vault_path);
+    if (normalized_path.empty() || sodium_init() < 0)
     {
         return false;
     }
 
 #ifdef _WIN32
     std::string blob;
-    if (!Storage::readFile(vault_path + ".oskey", blob) || blob.empty() ||
+    if (!Storage::readFile(normalized_path + ".oskey", blob) || blob.empty() ||
         blob.size() > 65536)
     {
         return false;
@@ -178,7 +210,8 @@ bool AutoUnsealStore::unprotectFragment(
     input.cbData = static_cast<DWORD>(blob.size());
     DATA_BLOB entropy{};
     std::array<unsigned char, crypto_generichash_BYTES> digest{};
-    const std::string context = "Void Vault OS auto-unseal v1:" + vault_path;
+    const std::string context =
+        "Void Vault OS auto-unseal v1:" + normalized_path;
     crypto_generichash(
         digest.data(),
         digest.size(),
@@ -216,7 +249,7 @@ bool AutoUnsealStore::unprotectFragment(
     LocalFree(decrypted.pbData);
     return valid;
 #elif defined(__linux__)
-    const std::string description = keyDescription(vault_path);
+    const std::string description = keyDescription(normalized_path);
     const long serial = searchKey(description.c_str());
     if (serial < 0)
     {
@@ -240,13 +273,14 @@ bool AutoUnsealStore::unprotectFragment(
 
 bool AutoUnsealStore::removeFragment(const std::string& vault_path)
 {
-    if (vault_path.empty())
+    const std::string normalized_path = normalizeVaultPath(vault_path);
+    if (normalized_path.empty())
     {
         return false;
     }
 
 #ifdef _WIN32
-    const std::string path = vault_path + ".oskey";
+    const std::string path = normalized_path + ".oskey";
     if (Storage::isSymlinkOrReparsePoint(path))
     {
         return false;
@@ -258,7 +292,7 @@ bool AutoUnsealStore::removeFragment(const std::string& vault_path)
     }
     return std::filesystem::remove(path, ec) && !ec;
 #elif defined(__linux__)
-    const std::string description = keyDescription(vault_path);
+    const std::string description = keyDescription(normalized_path);
     const long serial = searchKey(description.c_str());
     if (serial < 0)
     {

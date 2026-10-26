@@ -16,6 +16,53 @@ extern "C" {
 
 // Opaque handle representing an embedded Void Vault + VaultBroker instance.
 typedef struct VoidVaultHandle VoidVaultHandle;
+typedef struct VoidVaultDaemonClient VoidVaultDaemonClient;
+
+// Starts a separate `void_vault --broker` process for operations such as
+// Transit. Unlike VoidVaultHandle, this client never loads the vault master
+// key into the caller's process. `auto_unseal` is 0 or 1.
+VV_API VoidVaultDaemonClient* vv_daemon_client_open(
+    const char* executable_path,
+    const char* data_dir,
+    int auto_unseal);
+VV_API void vv_daemon_client_close(VoidVaultDaemonClient* client);
+VV_API int vv_daemon_client_setup(
+    VoidVaultDaemonClient* client,
+    const char* master_password);
+VV_API int vv_daemon_client_unlock(
+    VoidVaultDaemonClient* client,
+    const char* master_password);
+VV_API int vv_daemon_client_enable_auto_unseal(
+    VoidVaultDaemonClient* client,
+    const char* current_password);
+VV_API int vv_daemon_client_disable_auto_unseal(VoidVaultDaemonClient* client);
+VV_API int vv_daemon_client_issue_token(
+    VoidVaultDaemonClient* client,
+    const char* app_id,
+    const char* scope,
+    uint64_t ttl_seconds,
+    char* out_token_buf,
+    size_t out_token_buf_size);
+VV_API int vv_daemon_transit_encrypt(
+    VoidVaultDaemonClient* client,
+    const char* token,
+    const char* app_id,
+    const char* key_id,
+    const void* plaintext,
+    size_t plaintext_size,
+    void* out_ciphertext,
+    size_t out_ciphertext_size,
+    size_t* out_ciphertext_written);
+VV_API int vv_daemon_transit_decrypt(
+    VoidVaultDaemonClient* client,
+    const char* token,
+    const char* app_id,
+    const char* key_id,
+    const void* ciphertext,
+    size_t ciphertext_size,
+    void* out_plaintext,
+    size_t out_plaintext_size,
+    size_t* out_plaintext_written);
 
 // Opens a Void Vault instance bound to `auth_file_path` and `data_file_path`.
 // Automatically attaches a hash-chained audit log at `<data_file_path>.audit.log`.

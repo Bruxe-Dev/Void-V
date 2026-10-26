@@ -17,8 +17,9 @@ This guide explains how software developers can embed **Void Vault v2.0** into t
 4. [Emergency Recovery Keys & Tamper-Evident Audit Logs](#4-emergency-recovery-keys--tamper-evident-audit-logs)
 5. [Low-Level Option A: Native In-Memory DLL Bridge (`VoidVaultNativeClient`)](#5-low-level-option-a-native-in-memory-dll-bridge-voidvaultnativeclient)
 6. [Low-Level Option B: Language-Agnostic `--broker` IPC Protocol (Node.js, Go, Rust, C#)](#6-low-level-option-b-language-agnostic---broker-ipc-protocol-nodejs-go-rust-c)
-7. [Low-Level Option C: Universal C ABI v2 (`include/void_vault_c.h` & `void_vault.dll`)](#7-low-level-option-c-universal-c-abi-v2-includevoid_vault_ch--void_vaultdll)
-8. [Low-Level Option D: Native C++20 Library (`VaultBroker`)](#8-low-level-option-d-native-c20-library-vaultbroker)
+7. [Transit Encryption, PKI, and Auto-Unseal](#7-transit-encryption-pki-and-auto-unseal)
+8. [Low-Level Option C: Universal C ABI v2 (`include/void_vault_c.h` & `void_vault.dll`)](#8-low-level-option-c-universal-c-abi-v2-includevoid_vault_ch--void_vaultdll)
+9. [Low-Level Option D: Native C++20 Library (`VaultBroker`)](#9-low-level-option-d-native-c20-library-vaultbroker)
 
 ---
 
@@ -173,6 +174,10 @@ All secret values and passwords on the wire are **lowercase hex-encoded** so bin
 | `SET_EPHEMERAL_SECRET <key> <ttl_sec> <value_hex>` | `OK saved` | Stores a value in broker memory only; maximum TTL is 24 hours |
 | `GET_EPHEMERAL_SECRET <key>` | `OK <value_hex>` | Reads the value only while the vault is unlocked and before its TTL expires |
 | `DELETE_EPHEMERAL_SECRET <key>` | `OK deleted` | Wipes and removes an in-memory-only value |
+| `TRANSIT_ENCRYPT <token> <app_id> <key_id> <plaintext_hex>` | `OK <ciphertext_hex>` | Encrypts bytes inside the broker; token scope must allow `transit:encrypt` |
+| `TRANSIT_DECRYPT <token> <app_id> <key_id> <ciphertext_hex>` | `OK <plaintext_hex>` | Decrypts bytes inside the broker; token scope must allow `transit:decrypt` |
+| `PKI_CREATE_CA <authority_id> <common_name_hex>` | `OK <certificate_hex>` | Creates a self-signed Ed25519 CA; private material is kept in encrypted vault storage |
+| `PKI_ISSUE_CERTIFICATE <authority_id> <validity_days> <common_name_hex>` | `OK <certificate_hex>` | Issues a leaf certificate using the selected CA |
 | `LIST_KEYS` | `OK key1,key2,...` | Lists all user key names |
 | `ISSUE_TOKEN <app_id> <scope> <ttl_sec>` | `OK VVTOK1.<payload>.<mac>` | Issues a signed capability token |
 | `VERIFY_TOKEN <token> <app_id>` | `OK <scope> <expires_unix>` | Verifies token HMAC, TTL, and `app_id` |
@@ -193,7 +198,67 @@ copied into caller memory; the broker cannot wipe that copy later.
 
 ---
 
-## 7. Low-Level Option C: Universal C ABI v2 (`include/void_vault_c.h` & `void_vault.dll`)
+## 7. Transit Encryption, PKI, and Auto-Unseal
+
+### Transit mode
+
+Transit operations require a running `--broker` process. The payload and
+ciphertext are sent over its standard-input/output IPC channel; the caller
+does not load the Transit master key. Transit keys are separate from the token
+signing key, and each ciphertext is bound to its `key_id`. Issue narrowly scoped
+tokens such as `transit:encrypt` or `transit:decrypt` rather than `*`.
+
+For the Python high-level API, select the broker explicitly because the default
+native DLL backend is in-process:
+
+```python
+from void_vault import VaultApp
+
+vault = VaultApp(
+    app_id="payments-worker",
+    scope="transit:encrypt",
+    vault_root="./user_vaults",
+    prefer_native_dll=False,
+)
+with vault.session(user_id="customer-1042", passphrase=passphrase) as session:
+    ciphertext = session.transit_encrypt("payments-v1", b"payload")
+```
+
+The IPC and C ABI Transit interface accepts byte strings and returns
+ciphertext/plaintext bytes. Payloads are limited to 16 KiB. Ciphertext is
+authenticated; decryption fails if it is modified or presented with a
+different `key_id`. The broker cannot prevent a caller from copying plaintext
+or keys it receives back through other APIs.
+
+### PKI mode
+
+The broker can create self-signed Ed25519 certificate authorities and issue
+leaf certificates. The CA private key bundle is stored in encrypted `VVKV1`
+storage, not returned by the API. The CA validity is fixed at 10 years, and
+leaf certificate validity is limited to 825 days. The C++ operation engine and
+Python `VoidVaultClient` expose the PKI operations; the current C ABI exports
+daemon Transit operations but does not yet expose PKI calls.
+
+### OS-backed auto-unseal
+
+Auto-unseal is opt-in and should only be enabled for a trusted, local,
+single-user background service. `ENABLE_AUTO_UNSEAL` creates a random fragment
+protected by the current OS user and stores an authenticated encrypted password
+envelope beside the vault data file. Start the broker with `--auto-unseal` to
+attempt an unlock at startup. The Windows implementation uses current-user
+DPAPI; Linux uses the current user's kernel keyring. Other operating systems
+currently report that auto-unseal is unavailable.
+
+This feature is a convenience, not a defense against malware, an administrator,
+or another process running as the same OS user: that user context can generally
+access the protected fragment and the vault files. Keep the vault directory
+private, and do not enable auto-unseal for a shared or remotely accessible
+account. Disable it with `DISABLE_AUTO_UNSEAL` before moving a vault or
+transferring it to another machine/user.
+
+---
+
+## 8. Low-Level Option C: Universal C ABI v2 (`include/void_vault_c.h` & `void_vault.dll`)
 
 For C, Rust (`bindgen`), Go (`cgo`), C# (`P/Invoke`), or Python (`ctypes`), link against `void_vault.dll` / `libvoid_vault_core.a` and include [`include/void_vault_c.h`](include/void_vault_c.h):
 
@@ -225,7 +290,16 @@ int main(void) {
 
 ---
 
-## 8. Low-Level Option D: Native C++20 Library (`VaultBroker`)
+For Transit calls that must keep the master key out of the caller process, use
+the separate-process API in the same header: `vv_daemon_client_open`,
+`vv_daemon_client_issue_token`, `vv_daemon_transit_encrypt`, and
+`vv_daemon_transit_decrypt`. Do not use `VoidVaultHandle`/`vv_open` for that
+trust boundary because those embedded APIs run the vault core inside the
+calling process. The daemon C API accepts raw byte payloads, uses the local
+`void_vault --broker` process, and returns ciphertext/plaintext through caller
+buffers.
+
+## 9. Low-Level Option D: Native C++20 Library (`VaultBroker`)
 
 In CMake projects, link against `void_vault_core` and include `src/vault/broker.hpp`:
 

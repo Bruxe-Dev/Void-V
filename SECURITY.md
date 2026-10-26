@@ -36,6 +36,13 @@ Void Vault uses established primitives from **libsodium** with zero custom crypt
    - In persistent mode, `Authorizer::verifyPassword` increments and atomically persists `failed=<n>` **before** verifying the Argon2id hash, so killing the process mid-check cannot bypass the 5-attempt counter.
    - Any corrupted, empty, or malformed `vault_auth.dat` triggers `hasStorageError() == true` and refuses both login and re-initialization (a corrupted auth file never silently becomes a new account).
    - `Vault::saveData` verifies that any existing `vault_data.dat` can be decrypted with the current session password before overwriting (`VaultError::ForeignDataExists`), preventing accidental data loss if `vault_auth.dat` was recreated with a different password.
+5. **Broker Extensions**
+   - Ephemeral values are held only in broker memory, checked against a monotonic TTL on access, and wiped by cleanup or vault lock. They are not persisted to the `VVKV1` store.
+   - Transit encryption runs in the broker process with a separate key and capability scopes (`transit:encrypt`, `transit:decrypt`). The daemon C ABI sends payload bytes over local process pipes; embedded/in-process C ABI handles do not provide this process boundary.
+   - PKI CA private-key bundles are persisted only inside the encrypted vault store. The broker returns certificates, not private CA bundles.
+6. **OS-Backed Auto-Unseal**
+   - Opt-in auto-unseal encrypts the master password under a random fragment. Windows protects the fragment with current-user DPAPI; Linux stores it in the current user's kernel keyring. The encrypted envelope is stored beside the vault data file.
+   - This is not protection against malware, administrators, or another process running as the same OS user. Anyone able to execute as that user may be able to use the OS credential context and access the vault files. Auto-unseal is unsuitable for shared accounts or remotely accessible services.
 
 ---
 
@@ -43,6 +50,8 @@ Void Vault uses established primitives from **libsodium** with zero custom crypt
 
 - **Offline Brute-Force Resistance:** `vault_auth.dat` enforces a 5-attempt lockout for online interactive sessions. An attacker with direct read access to `vault_data.dat` can mount an offline password-guessing attack bounded by the Argon2id KDF cost (`--kdf sensitive` uses 1 GiB RAM and 4 iterations per guess) and password entropy. Always use a high-entropy passphrase and `--kdf moderate` or `--kdf sensitive` for high-value secrets.
 - **Same-UID / Kernel Compromise:** If an attacker already runs arbitrary code as the same OS user (with administrative privileges or kernel access), they can intercept keystrokes before they reach the process.
+- **Auto-Unseal Trust Boundary:** Enabling auto-unseal deliberately trades an interactive password prompt for trust in the local OS account. It does not provide hardware-backed isolation from same-user malware and does not make a compromised host safe.
+- **Broker IPC Boundary:** The daemon-backed Transit C ABI keeps master keys out of the companion process, but the companion still receives plaintext after a successful decrypt and can retain its own copies. Process pipes are local IPC, not a substitute for OS account isolation.
 - **Unattended Cloud / Daemon Workloads:** Void Vault is designed for interactive human-operated credential storage. Unattended cloud workers should use a cloud KMS/HSM (AWS KMS, GCP Secret Manager, Azure Key Vault, or HashiCorp Vault) with short-lived workload identity tokens.
 
 ---
