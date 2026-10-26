@@ -80,8 +80,10 @@ int main()
               "Ephemeral reads rejected while vault is locked");
         check(vault.authenticate(password) && vault.unlock(),
               "Vault unlocked after ephemeral tests");
-        check(broker.deleteEphemeralSecret("session.locked"),
-              "Delete the still-live ephemeral secret after unlocking");
+        check(!broker.getEphemeralSecret("session.locked", val),
+              "Vault locking wipes ephemeral secrets");
+        check(broker.setEphemeralSecret("session.restart", "process-only", 30),
+              "Save ephemeral secret before broker restart");
     }
 
     // --- 2. "Sign in with Void Vault" Scoped Capability Tokens & App Isolation ---
@@ -92,6 +94,9 @@ int main()
         VaultBroker broker(vault);
 
         check(vault.authenticate(password) && vault.unlock(), "Unlock after restart");
+        std::string ephemeral_after_restart;
+        check(!broker.getEphemeralSecret("session.restart", ephemeral_after_restart),
+              "Ephemeral secret is absent after broker restart");
 
         std::string trader_read_token;
         check(broker.issueToken("void-trader", "read:trader.*", 300, trader_read_token, 1000),

@@ -186,10 +186,10 @@ All secret values and passwords on the wire are **lowercase hex-encoded** so bin
 | `VERIFY_AUDIT` | `OK <entry_count>` | Verifies the BLAKE2b-256 hash chain of `vault_audit.log` |
 | `QUIT` | `OK bye` | Locks the vault, wipes memory, and exits `0` |
 
-Ephemeral values are not included in `VVKV1`, are lost when the broker process exits,
-and are purged after expiry. A read rejects an expired value even if the background
-cleanup has not run yet. A value returned to a caller is copied into caller memory;
-the broker cannot wipe that copy later.
+Ephemeral values are not included in `VVKV1`, are wiped when the vault locks or the
+broker process exits, and are purged after expiry. A read rejects an expired value
+even if the background cleanup has not run yet. A value returned to a caller is
+copied into caller memory; the broker cannot wipe that copy later.
 
 ---
 

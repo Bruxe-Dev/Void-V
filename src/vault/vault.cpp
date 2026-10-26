@@ -102,6 +102,10 @@ bool Vault::isUnlocked() const {
     return is_unlocked;
 }
 
+void Vault::setLockCallback(std::function<void()> callback) {
+    lock_callback = std::move(callback);
+}
+
 VaultError Vault::lastError() const {
     return last_error;
 }
@@ -156,6 +160,10 @@ void Vault::lock() {
     is_unlocked = false;
     authorizer.revokeAuthorization();
     session_password.clear();
+    if (lock_callback)
+    {
+        lock_callback();
+    }
     if (was_unlocked) {
         recordAudit("VAULT_LOCKED", "owner", "vault");
     }

@@ -169,11 +169,21 @@ namespace
 VaultBroker::VaultBroker(Vault &vault)
     : vault_(vault)
 {
-    expiry_thread_ = std::thread(&VaultBroker::runExpiryWorker, this);
+    vault_.setLockCallback([this] { clearEphemeralSecrets(); });
+    try
+    {
+        expiry_thread_ = std::thread(&VaultBroker::runExpiryWorker, this);
+    }
+    catch (...)
+    {
+        vault_.setLockCallback({});
+        throw;
+    }
 }
 
 VaultBroker::~VaultBroker()
 {
+    vault_.setLockCallback({});
     {
         std::lock_guard<std::mutex> lock(ephemeral_mutex_);
         stop_expiry_thread_ = true;
@@ -944,6 +954,16 @@ void VaultBroker::purgeExpiredEphemeralSecrets(Clock::time_point now)
     }
 }
 
+void VaultBroker::clearEphemeralSecrets()
+{
+    std::lock_guard<std::mutex> lock(ephemeral_mutex_);
+    for (auto &entry : ephemeral_secrets_)
+    {
+        entry.second.value.clear();
+    }
+    ephemeral_secrets_.clear();
+}
+
 void VaultBroker::runExpiryWorker()
 {
     std::unique_lock<std::mutex> lock(ephemeral_mutex_);
@@ -988,7 +1008,14 @@ bool VaultBroker::setEphemeralSecret(
     {
         std::lock_guard<std::mutex> lock(ephemeral_mutex_);
         purgeExpiredEphemeralSecrets(Clock::now());
-        ephemeral_secrets_.insert_or_assign(std::string(key), std::move(entry));
+        const std::string owned_key(key);
+        const auto existing = ephemeral_secrets_.find(owned_key);
+        if (existing == ephemeral_secrets_.end() &&
+            ephemeral_secrets_.size() >= MAX_EPHEMERAL_SECRETS)
+        {
+            return false;
+        }
+        ephemeral_secrets_.insert_or_assign(owned_key, std::move(entry));
     }
 
     ephemeral_cv_.notify_one();

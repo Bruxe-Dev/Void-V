@@ -102,8 +102,10 @@ file(REMOVE "${WORK_DIR}/vault_auth.dat" "${WORK_DIR}/vault_data.dat")
 string(HEX "${PW}" pw_hex)
 string(HEX "mt5-api-key-999" val_hex)
 string(TOLOWER "${val_hex}" val_hex)
+string(HEX "temporary-value" ephemeral_hex)
+string(TOLOWER "${ephemeral_hex}" ephemeral_hex)
 file(WRITE "${WORK_DIR}/broker.in"
-    "SETUP ${pw_hex}\nUNLOCK ${pw_hex}\nSET_SECRET trader.api_key ${val_hex}\nISSUE_TOKEN void-trader read:trader.* 300\nDERIVE_APP_KEYnotok void-trader 1\nQUIT\n")
+    "SETUP ${pw_hex}\nUNLOCK ${pw_hex}\nSET_SECRET trader.api_key ${val_hex}\nSET_EPHEMERAL_SECRET temporary.key 30 ${ephemeral_hex}\nGET_EPHEMERAL_SECRET temporary.key\nDELETE_EPHEMERAL_SECRET temporary.key\nISSUE_TOKEN void-trader read:trader.* 300\nDERIVE_APP_KEYnotok void-trader 1\nQUIT\n")
 execute_process(
     COMMAND "${APP}" --data-dir "${WORK_DIR}" --broker
     INPUT_FILE "${WORK_DIR}/broker.in"
@@ -118,7 +120,9 @@ string(FIND "${broker_out}" "OK initialized" b1)
 string(FIND "${broker_out}" "OK unlocked" b2)
 string(FIND "${broker_out}" "OK saved" b3)
 string(FIND "${broker_out}" "OK VVTOK1." b4)
-if(b1 EQUAL -1 OR b2 EQUAL -1 OR b3 EQUAL -1 OR b4 EQUAL -1)
+string(FIND "${broker_out}" "OK ${ephemeral_hex}" b5)
+string(FIND "${broker_out}" "OK deleted" b6)
+if(b1 EQUAL -1 OR b2 EQUAL -1 OR b3 EQUAL -1 OR b4 EQUAL -1 OR b5 EQUAL -1 OR b6 EQUAL -1)
     message(FATAL_ERROR "broker output missing expected responses:\n${broker_out}")
 endif()
 

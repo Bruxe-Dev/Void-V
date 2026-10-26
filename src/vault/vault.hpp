@@ -2,6 +2,7 @@
 #define VOID_VAULT_VAULT_HPP
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 
@@ -40,6 +41,7 @@ public:
     // Optional tamper-evident AuditLog attachment.
     void setAuditLog(AuditLog* log) noexcept { audit_log = log; }
     AuditLog* auditLog() const noexcept { return audit_log; }
+    void setLockCallback(std::function<void()> callback);
 
     // Configures automatic inactivity lock timeout (0 = disabled).
     void setIdleTimeoutSeconds(std::uint64_t seconds) noexcept { idle_timeout_seconds = seconds; }
@@ -86,6 +88,7 @@ private:
     Encryption encryption;
     SecureBuffer session_password;
     AuditLog* audit_log = nullptr;
+    std::function<void()> lock_callback;
     std::uint64_t idle_timeout_seconds = 0;
     std::uint64_t last_activity_unix = 0;
     bool is_unlocked;

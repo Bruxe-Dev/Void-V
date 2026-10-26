@@ -45,6 +45,7 @@ struct CapabilityClaims
 class VaultBroker
 {
 public:
+    static constexpr std::size_t MAX_EPHEMERAL_SECRETS = 1024;
     static constexpr std::uint64_t MAX_EPHEMERAL_TTL_SECONDS = 86400;
     static constexpr std::uint64_t DEFAULT_TOKEN_TTL_SECONDS = 300; // 5 minutes
     static constexpr std::uint64_t MAX_TOKEN_TTL_SECONDS = 86400;   // 24 hours
@@ -141,6 +142,7 @@ private:
     };
 
     void purgeExpiredEphemeralSecrets(Clock::time_point now);
+    void clearEphemeralSecrets();
     void runExpiryWorker();
 
     void recordAudit(std::string_view event, std::string_view actor, std::string_view target);
