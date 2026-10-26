@@ -5,8 +5,14 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <chrono>
+#include <unordered_map>
+#include <mutex>
+#include <thread>
+#include <condition_variable>
 
 #include "vault.hpp"
+#include "../security/secure_buffer.hpp"
 
 // Represents a parsed and verified "Sign in with Void Vault" capability token.
 // Format on the wire:
@@ -22,7 +28,8 @@
 //   "key:<exact_key>"   -> read + write access to a single exact key
 //   "read_key:<key>"    -> read-only access to a single exact key
 //   "auth:only"         -> identity/sign-in verification & subkey derivation only (no secret read/write)
-struct CapabilityClaims {
+struct CapabilityClaims
+{
     std::uint64_t issued_at = 0;
     std::uint64_t expires_at = 0;
     std::string app_id;
@@ -35,23 +42,32 @@ struct CapabilityClaims {
 // All named secrets and internal broker signing/KDF keys are serialized inside
 // the single XChaCha20-Poly1305 AEAD encrypted vault payload ("VVKV1"), so
 // key names, secret counts, and values are completely hidden on disk.
-class VaultBroker {
+class VaultBroker
+{
 public:
+    static constexpr std::uint64_t MAX_EPHEMERAL_TTL_SECONDS = 86400;
     static constexpr std::uint64_t DEFAULT_TOKEN_TTL_SECONDS = 300; // 5 minutes
     static constexpr std::uint64_t MAX_TOKEN_TTL_SECONDS = 86400;   // 24 hours
     static constexpr std::size_t MAX_KEY_LENGTH = 256;
 
-    explicit VaultBroker(Vault& vault);
+    explicit VaultBroker(Vault &vault);
     ~VaultBroker();
 
-    VaultBroker(const VaultBroker&) = delete;
-    VaultBroker& operator=(const VaultBroker&) = delete;
+    VaultBroker(const VaultBroker &) = delete;
+    VaultBroker &operator=(const VaultBroker &) = delete;
 
     // --- Direct Unlocked Key-Value Operations (for Vault Owner) ---
     bool setSecret(std::string_view key, std::string_view value);
-    bool getSecret(std::string_view key, std::string& out_value);
+    bool getSecret(std::string_view key, std::string &out_value);
     bool deleteSecret(std::string_view key);
-    bool listKeys(std::vector<std::string>& out_keys);
+    bool listKeys(std::vector<std::string> &out_keys);
+    bool setEphemeralSecret(
+        std::string_view key,
+        std::string_view value,
+        std::uint64_t ttl_seconds);
+
+    bool getEphemeralSecret(std::string_view key, std::string &out_value);
+    bool deleteEphemeralSecret(std::string_view key);
 
     // --- "Sign in with Void Vault" Delegated App Authorization ---
     // Issues a cryptographically signed (HMAC-SHA512256), time-bounded
@@ -61,7 +77,7 @@ public:
         std::string_view app_id,
         std::string_view scope,
         std::uint64_t ttl_seconds,
-        std::string& out_token,
+        std::string &out_token,
         std::uint64_t now_unix = 0);
 
     // Verifies a token's cryptographic MAC, expiration timestamp, and app_id
@@ -69,7 +85,7 @@ public:
     bool verifyToken(
         std::string_view token,
         std::string_view expected_app_id,
-        CapabilityClaims& out_claims,
+        CapabilityClaims &out_claims,
         std::uint64_t now_unix = 0);
 
     // Revokes all tokens issued specifically for `app_id` without invalidating
@@ -85,7 +101,7 @@ public:
         std::string_view token,
         std::string_view app_id,
         std::string_view key,
-        std::string& out_value,
+        std::string &out_value,
         std::uint64_t now_unix = 0);
 
     bool setSecretWithToken(
@@ -104,7 +120,7 @@ public:
         std::string_view token,
         std::string_view app_id,
         std::uint64_t subkey_id,
-        std::string& out_key_hex,
+        std::string &out_key_hex,
         std::uint64_t now_unix = 0);
 
     static bool isValidKeyName(std::string_view key) noexcept;
@@ -112,17 +128,34 @@ public:
     static bool scopeAllowsWrite(std::string_view scope, std::string_view key) noexcept;
 
 private:
-    struct KeyValue {
+    using Clock = std::chrono::steady_clock;
+
+    struct EphemeralSecret
+    {
+        SecureBuffer value;
+        Clock::time_point expires_at;
+    };
+
+    std::unordered_map<std::string, EphemeralSecret> ephemeral_secrets_;
+    std::mutex ephemeral_mutex_;
+    std::condition_variable ephemeral_cv_;
+    std::thread expiry_thread_;
+    bool stop_expiry_thread_ = false;
+
+    void purgeExpiredEphemeralSecrets(Clock::time_point now);
+    void runExpiryWorker();
+    struct KeyValue
+    {
         std::string key;
         std::string value;
     };
 
     void recordAudit(std::string_view event, std::string_view actor, std::string_view target);
-    bool loadStore(std::vector<KeyValue>& entries, unsigned char master_key[32], bool& has_master_key);
-    bool saveStore(const std::vector<KeyValue>& entries, const unsigned char master_key[32]);
-    bool ensureBrokerKey(std::vector<KeyValue>& entries, unsigned char master_key[32]);
+    bool loadStore(std::vector<KeyValue> &entries, unsigned char master_key[32], bool &has_master_key);
+    bool saveStore(const std::vector<KeyValue> &entries, const unsigned char master_key[32]);
+    bool ensureBrokerKey(std::vector<KeyValue> &entries, unsigned char master_key[32]);
 
-    Vault& vault_;
+    Vault &vault_;
 };
 
 #endif

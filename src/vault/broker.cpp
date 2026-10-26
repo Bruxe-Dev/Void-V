@@ -167,11 +167,23 @@ namespace
 }
 
 VaultBroker::VaultBroker(Vault &vault)
-    : vault_(vault)
+    : vault_(vault),
+      expiry_thread_(&VaultBroker::runExpiryWorker, this)
 {
 }
 
-VaultBroker::~VaultBroker() = default;
+VaultBroker::~VaultBroker()
+{
+    {
+        std::lock_guard<std::mutex> lock(ephemeral_mutex_);
+        stop_expiry_thread_ = true;
+    }
+    ephemeral_cv_.notify_one();
+    if (expiry_thread_.joinable())
+    {
+        expiry_thread_.join();
+    }
+};
 
 void VaultBroker::recordAudit(std::string_view event, std::string_view actor, std::string_view target)
 {
@@ -914,5 +926,69 @@ bool VaultBroker::deriveAppKey(
     out_key_hex = toHex(derived, sizeof(derived));
     sodium_memzero(derived, sizeof(derived));
     recordAudit("APP_KEY_DERIVED", app_id, std::to_string(subkey_id));
+    return true;
+}
+void VaultBroker::purgeExpiredEphemeralSecrets(Clock::time_point now)
+{
+    for (auto it = ephemeral_secrets_.begin(); it != ephemeral_secrets_.end();)
+    {
+        if (it->second.expires_at <= now)
+        {
+            it->second.value.clear();
+            it = ephemeral_secrets_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
+void VaultBroker::runExpiryWorker()
+{
+    std::unique_lock<std::mutex> lock(ephemeral_mutex_);
+    while (!stop_expiry_thread_)
+    {
+        if (ephemeral_cv_.wait_for(
+
+                lock, std::chrono::seconds(1), [this]
+                { return stop_expiry_thread_; }))
+        {
+            break;
+        }
+        purgeExpiredEphemeralSecrets(Clock::now());
+    }
+}
+bool VaultBroker::setEphemeralSecret(
+    std::string_view key,
+    std::string_view value,
+    std::uint64_t ttl_seconds)
+{
+    if (!isValidKeyName(key) ||
+        ttl_seconds == 0 ||
+        ttl_seconds > MAX_EPHEMERAL_TTL_SECONDS ||
+        value.size() > SecureBuffer::MAX_CAPACITY)
+    {
+        return false;
+    }
+
+    (void)vault_.checkIdleTimeout();
+    if (!vault_.isUnlocked())
+    {
+        return false;
+    }
+
+    EphemeralSecret entry;
+    entry.value.assign(value);
+    entry.expires_at = Clock::now() + std::chrono::seconds(ttl_seconds);
+
+    {
+        std::lock_guard<std::mutex> lock(ephemeral_mutex_);
+        purgeExpiredEphemeralSecrets(Clock::now());
+        ephemeral_secrets_.insert_or_assign(std::string(key), std::move(entry));
+    }
+
+    ephemeral_cv_.notify_one();
+    recordAudit("EPHEMERAL_SECRET_SAVED", "owner", key);
     return true;
 }
